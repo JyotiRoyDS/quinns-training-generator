@@ -2010,7 +2010,7 @@ def main():
     if 'generator' not in st.session_state:
         st.session_state.generator = None
     if 'api_key' not in st.session_state:
-        st.session_state.api_key = ""
+        st.session_state.api_key = OPENAI_API_KEY
     if 'topics' not in st.session_state:
         st.session_state.topics = []
     if 'outline' not in st.session_state:

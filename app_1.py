@@ -46,19 +46,19 @@ def get_api_key():
         if hasattr(st, 'secrets') and 'OPENAI_API_KEY' in st.secrets:
             api_key = st.secrets['OPENAI_API_KEY']
             if api_key and api_key.strip():
-                logger.info("✓ API key loaded from Streamlit secrets")
                 return api_key.strip()
-    except Exception as e:
-        logger.warning(f"Could not load from Streamlit secrets: {e}")
+    except Exception:
+        # Logger not available yet at this point
+        pass
     
     # Fall back to environment variable (for local development)
     api_key = os.getenv('OPENAI_API_KEY')
     if api_key and api_key.strip():
-        logger.info("✓ API key loaded from environment variable")
         return api_key.strip()
     
-    logger.error("✗ No API key found in secrets or environment")
+    # Return None if no key found
     return None
+
 
 OPENAI_API_KEY = get_api_key()
 # Set up logging

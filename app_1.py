@@ -40,13 +40,25 @@ from pptx.enum.text import PP_ALIGN
 from openai import OpenAI
 from tenacity import retry, wait_exponential, stop_after_attempt, retry_if_exception_type
 def get_api_key():
-    """Load API key from Streamlit secrets or environment"""
+    """Load API key from Streamlit secrets or environment variable"""
+    # Try Streamlit secrets first (for cloud deployment)
     try:
         if hasattr(st, 'secrets') and 'OPENAI_API_KEY' in st.secrets:
-            return st.secrets['OPENAI_API_KEY']
-    except:
-        pass
-    return os.getenv('OPENAI_API_KEY')
+            api_key = st.secrets['OPENAI_API_KEY']
+            if api_key and api_key.strip():
+                logger.info("✓ API key loaded from Streamlit secrets")
+                return api_key.strip()
+    except Exception as e:
+        logger.warning(f"Could not load from Streamlit secrets: {e}")
+    
+    # Fall back to environment variable (for local development)
+    api_key = os.getenv('OPENAI_API_KEY')
+    if api_key and api_key.strip():
+        logger.info("✓ API key loaded from environment variable")
+        return api_key.strip()
+    
+    logger.error("✗ No API key found in secrets or environment")
+    return None
 
 OPENAI_API_KEY = get_api_key()
 # Set up logging
@@ -1703,8 +1715,21 @@ class TrainingGenerator:
 # Custom CSS for beautiful UI
 def load_custom_css():
     if not OPENAI_API_KEY:
-        st.error("🔑 API Key Not Configured")
-        st.info("Add OPENAI_API_KEY in Streamlit Cloud Secrets")
+        st.error("⚠️ API Key Not Configured")
+        st.markdown("""
+        ### How to fix this:
+        
+        **For Streamlit Cloud:**
+        1. Go to your app settings → **Secrets**
+        2. Add the following:
+        ```toml
+        OPENAI_API_KEY = "sk-proj-your-api-key-here"
+        ```
+        3. Click **Save** and wait for the app to redeploy
+        
+        **For local development:**
+        - Set environment variable: `export OPENAI_API_KEY="your-key"`
+        """)
         st.stop()
     st.markdown("""
     <style>

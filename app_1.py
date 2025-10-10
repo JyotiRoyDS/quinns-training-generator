@@ -59,7 +59,6 @@ def get_api_key():
     # Return None if no key found
     return None
 
-
 OPENAI_API_KEY = get_api_key()
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')

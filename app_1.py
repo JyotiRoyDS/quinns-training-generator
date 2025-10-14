@@ -13,6 +13,8 @@ from typing import List, Dict, Tuple, Any, Optional, Union
 import asyncio
 import logging
 from concurrent.futures import ThreadPoolExecutor
+import threading
+import queue
 
 # Document processing
 import pdfplumber
@@ -39,6 +41,7 @@ from pptx.enum.text import PP_ALIGN
 # API - OpenAI 1.0+ compatible
 from openai import OpenAI
 from tenacity import retry, wait_exponential, stop_after_attempt, retry_if_exception_type
+
 def get_api_key():
     """Load API key from Streamlit secrets or environment variable"""
     # Try Streamlit secrets first (for cloud deployment)
@@ -48,7 +51,6 @@ def get_api_key():
             if api_key and api_key.strip():
                 return api_key.strip()
     except Exception:
-        # Logger not available yet at this point
         pass
     
     # Fall back to environment variable (for local development)
@@ -56,10 +58,10 @@ def get_api_key():
     if api_key and api_key.strip():
         return api_key.strip()
     
-    # Return None if no key found
     return None
 
 OPENAI_API_KEY = get_api_key()
+
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("QUINNS-TrainingGenerator")
@@ -71,9 +73,9 @@ DEFAULT_SLIDES_PER_TOPIC = 5
 
 # Training duration constants (in minutes per slide)
 SLIDE_DURATION_MAP = {
-    "fast": 3,      # 3 minutes per slide
-    "medium": 5,    # 5 minutes per slide  
-    "thorough": 8   # 8 minutes per slide
+    "fast": 3,
+    "medium": 5,
+    "thorough": 8
 }
 
 # Create output directories
@@ -483,14 +485,14 @@ def calculate_training_duration(num_slides: int, pace: str = "medium", includes_
     
     # Add breaks (10 min per hour)
     total_hours = presentation_time / 60
-    break_time = (total_hours // 1) * 10  # 10 min break per hour
+    break_time = (total_hours // 1) * 10
     
     total_minutes = presentation_time + break_time
     
     return {
         "total_minutes": total_minutes,
         "total_hours": total_minutes / 60,
-        "days": total_minutes / (60 * 8),  # 8-hour days
+        "days": total_minutes / (60 * 8),
         "presentation_minutes": presentation_time,
         "break_minutes": break_time
     }
@@ -646,7 +648,7 @@ class ContentAnalyzer:
     
     @retry(wait=wait_exponential(multiplier=1, min=4, max=60), stop=stop_after_attempt(3))
     def _extract_topics_openai(self, content: str) -> List[Dict]:
-        content_sample = self._smart_sample(content, 6000)  # Increased from 4000
+        content_sample = self._smart_sample(content, 6000)
         
         prompt = PROMPTS["topic_extraction"].format(content=content_sample)
         
@@ -670,8 +672,7 @@ class ContentAnalyzer:
         return topics_data["topics"]
     
     def _smart_sample(self, text: str, target_chars: int) -> str:
-        """Sample text more intelligently to preserve context - ENHANCED"""
-        # DOUBLED the context window
+        """Sample text more intelligently to preserve context"""
         target_chars = target_chars * 2
         
         if len(text) <= target_chars:
@@ -681,15 +682,14 @@ class ContentAnalyzer:
         if not sentences:
             return text[:target_chars]
         
-        # Take MORE from beginning and end
-        first_count = int(len(sentences) * 0.5)  # 50% from start (was 40%)
-        last_count = int(len(sentences) * 0.3)   # 30% from end (was 20%)
+        first_count = int(len(sentences) * 0.5)
+        last_count = int(len(sentences) * 0.3)
         middle_count = len(sentences) - first_count - last_count
         
         selected = sentences[:first_count]
         
         if middle_count > 0:
-            stride = max(1, middle_count // 30)  # Sample more from middle (was 20)
+            stride = max(1, middle_count // 30)
             for i in range(first_count, first_count + middle_count, stride):
                 if i < len(sentences):
                     selected.append(sentences[i])
@@ -801,7 +801,7 @@ class ContentAnalyzer:
             for topic in topics
         ])
         
-        content_summary = self._smart_sample(content, 6000)  # Increased from 4000
+        content_summary = self._smart_sample(content, 6000)
         
         prompt = PROMPTS["outline_generation"].format(
             topics=topic_summary,
@@ -930,7 +930,7 @@ class DocumentGenerator:
         self.brand_config = brand_config
     
     def _get_relevant_context(self, topic: str, num_sentences: int = 30) -> str:
-        """Get MORE relevant context with better scoring - ENHANCED"""
+        """Get MORE relevant context with better scoring"""
         if "sentences" not in self.content_store:
             return ""
         
@@ -938,15 +938,13 @@ class DocumentGenerator:
         topic_lower = topic.lower()
         topic_words = set(topic_lower.split())
         
-        # Score sentences by relevance
         scored = []
         for sent in sentences:
             sent_lower = sent.lower()
             
-            # Multiple scoring factors
             word_matches = sum(1 for word in topic_words if word in sent_lower)
-            length_bonus = 1 if len(sent.split()) > 15 else 0  # Prefer detailed sentences
-            has_numbers = 1 if any(char.isdigit() for char in sent) else 0  # Facts with numbers
+            length_bonus = 1 if len(sent.split()) > 15 else 0
+            has_numbers = 1 if any(char.isdigit() for char in sent) else 0
             has_proper_nouns = 1 if any(word[0].isupper() for word in sent.split()[1:]) else 0
             
             score = (word_matches * 2) + length_bonus + has_numbers + has_proper_nouns
@@ -956,31 +954,27 @@ class DocumentGenerator:
         
         scored.sort(reverse=True)
         
-        # Get top sentences PLUS surrounding context for continuity
         relevant = []
         added_indices = set()
         
         for score, sent in scored[:num_sentences]:
             idx = sentences.index(sent)
             
-            # Add the sentence itself
             if idx not in added_indices:
                 relevant.append(sent)
                 added_indices.add(idx)
             
-            # Add next sentence for context continuity
             if idx + 1 < len(sentences) and (idx + 1) not in added_indices:
                 relevant.append(sentences[idx + 1])
                 added_indices.add(idx + 1)
         
-        return " ".join(relevant[:num_sentences * 2])  # Allow more context
+        return " ".join(relevant[:num_sentences * 2])
     
     def _validate_slide_content(self, slide: Dict) -> bool:
         """Check if slide has substantive, unique content"""
         content = slide.get('content', [])
         notes = slide.get('notes', '')
         
-        # Check for generic placeholders
         generic_phrases = [
             'key concept', 'important topic', 'discuss the', 'present information',
             'cover the basics', 'introduce the', 'explain the importance', 'overview of'
@@ -988,17 +982,14 @@ class DocumentGenerator:
         
         content_text = " ".join(str(c) for c in content).lower()
         
-        # Reject if too generic
         if any(phrase in content_text for phrase in generic_phrases):
             logger.warning(f"Rejected generic slide: {slide.get('title')}")
             return False
         
-        # Reject if notes too short
         if len(notes) < 100:
             logger.warning(f"Rejected slide with short notes: {slide.get('title')}")
             return False
         
-        # Require some specificity (numbers, proper nouns, technical terms)
         has_specificity = (
             any(char.isdigit() for char in content_text) or
             any(word[0].isupper() for word in content_text.split()[1:]) or
@@ -1015,13 +1006,11 @@ class DocumentGenerator:
            retry=retry_if_exception_type((Exception,)))
     async def generate_slides_batch(self, topic: str, module: Dict, num_slides: int, previous_context: str = "") -> List[Dict]:
         try:
-            # Get MORE context - increased significantly
-            context = self._get_relevant_context(topic, num_sentences=50)  # Was 10
+            context = self._get_relevant_context(topic, num_sentences=50)
             
             if not context:
                 context = " ".join(module.get("key_points", [topic]))
             
-            # Limit context size to avoid token issues
             max_context_chars = 4000
             if len(context) > max_context_chars:
                 context = context[:max_context_chars]
@@ -1039,7 +1028,6 @@ class DocumentGenerator:
                 previous_context=previous_context
             )
             
-            # Log prompt size for debugging
             logger.info(f"Generating {num_slides} slides for topic: {topic}")
             logger.info(f"Prompt length: {len(prompt)} chars")
             
@@ -1051,7 +1039,7 @@ class DocumentGenerator:
                 ],
                 temperature=0.3,
                 response_format={"type": "json_object"},
-                max_tokens=min(4000, 1000 * num_slides)  # Cap at 4000 tokens
+                max_tokens=min(4000, 1000 * num_slides)
             )
             
             result = response.choices[0].message.content
@@ -1064,7 +1052,6 @@ class DocumentGenerator:
                 logger.error(f"Response content: {result[:500]}")
                 raise
             
-            # Handle both list and dict formats
             if isinstance(slides_data, list):
                 slides_list = slides_data
             elif isinstance(slides_data, dict):
@@ -1075,7 +1062,6 @@ class DocumentGenerator:
                 logger.error(f"Unexpected slides_data type: {type(slides_data)}")
                 slides_list = []
             
-            # Validate slides before returning
             validated_slides = []
             for slide in slides_list:
                 if isinstance(slide, dict) and self._validate_slide_content(slide):
@@ -1090,7 +1076,6 @@ class DocumentGenerator:
         except Exception as e:
             logger.error(f"Error in generate_slides_batch for {topic}: {e}")
             logger.error(f"Error type: {type(e).__name__}")
-            # Return empty list instead of raising
             return []
     
     def _create_fallback_slide(self, topic: str, module: Dict = None) -> Dict:
@@ -1124,10 +1109,9 @@ class DocumentGenerator:
         }
     
     async def generate_slides_for_module(self, module: Dict, max_slides: int = 8) -> List[Dict]:
-        """Generate slides for a module with better context tracking and rate limiting - ENHANCED"""
+        """Generate slides for a module with better context tracking and rate limiting"""
         slides = []
         
-        # Title slide with actual content
         title_slide = {
             "slide_type": "title",
             "title": module["title"],
@@ -1137,21 +1121,18 @@ class DocumentGenerator:
         }
         slides.append(title_slide)
         
-        # Track covered content to avoid repetition
         covered_topics = set()
         context_history = f"Module: {module['title']}\nObjectives: {', '.join(module['objectives'])}\n"
         
         topics_to_cover = module.get("topics", [module["title"]])
         slides_per_topic = max(2, (max_slides - 1) // max(1, len(topics_to_cover)))
         
-        # Generate slides for each unique topic
         for idx, topic in enumerate(topics_to_cover):
             if topic in covered_topics:
                 continue
             
-            # Add delay between API calls to avoid rate limits
             if idx > 0:
-                await asyncio.sleep(2)  # 2 second delay between topics
+                await asyncio.sleep(2)
                 logger.info(f"Rate limit delay: waiting 2 seconds before next topic...")
             
             try:
@@ -1164,7 +1145,6 @@ class DocumentGenerator:
                     previous_context=context_history
                 )
                 
-                # Only add validated slides
                 if topic_slides:
                     for slide in topic_slides:
                         if len(slides) >= max_slides:
@@ -1172,13 +1152,11 @@ class DocumentGenerator:
                         
                         slides.append(slide)
                         
-                        # Update context history with detailed info
                         slide_summary = f"\nSlide: {slide.get('title', 'Untitled')}\nContent: {' '.join(slide.get('content', []))[:200]}\n"
                         context_history += slide_summary
                         covered_topics.add(topic)
                 else:
                     logger.warning(f"No slides generated for topic: {topic}")
-                    # Create fallback slide
                     if len(slides) < max_slides:
                         fallback = self._create_fallback_slide(topic, module)
                         slides.append(fallback)
@@ -1186,7 +1164,6 @@ class DocumentGenerator:
                 
             except Exception as e:
                 logger.error(f"Error generating slides for {topic}: {e}")
-                # Fallback for errors
                 if len(slides) < max_slides:
                     fallback = self._create_fallback_slide(topic, module)
                     slides.append(fallback)
@@ -1230,8 +1207,6 @@ class DocumentGenerator:
         modules = outline.get("modules", [])
         total_modules = len(modules)
         
-        # Recalculate slides per module based on actual module count
-        # Reserve 3 slides for intro/outro
         content_slides_needed = max_slides_per_module * total_modules
         adjusted_slides_per_module = max(8, content_slides_needed // total_modules)
         
@@ -1242,7 +1217,6 @@ class DocumentGenerator:
             try:
                 logger.info(f"Generating slides for module {module_idx + 1}/{total_modules}: {module.get('title')}")
                 
-                # Add delay between modules to avoid rate limits
                 if module_idx > 0:
                     delay = 3
                     logger.info(f"Rate limit delay: waiting {delay} seconds before next module...")
@@ -1255,7 +1229,6 @@ class DocumentGenerator:
                     logger.info(f"Successfully generated {len(module_slides)} slides for module {module_idx + 1}")
                 else:
                     logger.warning(f"No slides generated for module {module_idx + 1}, adding placeholder")
-                    # Add placeholder slide
                     all_slides.append({
                         "slide_type": "title",
                         "title": module.get("title", "Module"),
@@ -1264,10 +1237,9 @@ class DocumentGenerator:
                         "estimated_time_minutes": 5
                     })
                 
-                # Generate assessment for this module if enabled
                 if include_assessments:
                     try:
-                        await asyncio.sleep(2)  # Delay before assessment generation
+                        await asyncio.sleep(2)
                         assessment = await self.assessment_generator.generate_assessment(module, num_questions=5)
                         all_assessments[module['title']] = assessment
                         logger.info(f"Generated assessment for module {module_idx + 1}")
@@ -1277,7 +1249,6 @@ class DocumentGenerator:
             except Exception as e:
                 logger.error(f"Error processing module {module.get('title')}: {e}")
                 logger.error(f"Error details: {type(e).__name__}: {str(e)}")
-                # Add minimal placeholder slide
                 all_slides.append({
                     "slide_type": "title",
                     "title": module.get("title", "Module"),
@@ -1308,8 +1279,6 @@ class DocumentGenerator:
         """Apply brand colors to presentation if configured"""
         if not self.brand_config or 'colors' not in self.brand_config:
             return
-        
-        # This is a simplified version - in production you'd apply colors to master slides
         pass
     
     def create_powerpoint(self, slides: List[Dict], output_path: Union[str, Path]) -> Path:
@@ -1437,7 +1406,7 @@ class DocumentGenerator:
             ],
             temperature=0.3,
             response_format={"type": "json_object"},
-            max_tokens=2000  # Increased for more detailed content
+            max_tokens=2000
         )
         
         result = response.choices[0].message.content
@@ -1451,7 +1420,6 @@ class DocumentGenerator:
         
         doc.add_heading(f"Trainer Guide: {outline.get('title', 'Training Program')}", 0)
         
-        # Calculate total duration
         total_slide_time = sum(slide.get("estimated_time_minutes", 5) for slide in slides)
         duration_info = calculate_training_duration(len(slides), "medium", True)
         
@@ -1494,7 +1462,6 @@ class DocumentGenerator:
                             for point in module.get("key_points", []):
                                 doc.add_paragraph(f"• {point}")
                             
-                            # Add assessment info if available
                             if module.get('title') in assessments:
                                 doc.add_heading("Assessment", 2)
                                 doc.add_paragraph(f"This module includes {len(assessments[module.get('title')].get('questions', []))} assessment questions.")
@@ -1509,14 +1476,12 @@ class DocumentGenerator:
                     
                     doc.add_heading(f"Slide: {slide.get('title')}", 2)
                     
-                    # Teaching Content - The main substance
                     doc.add_heading("Teaching Content", 3)
                     doc.add_paragraph(guide_section.get("teaching_content", "Detailed teaching content"))
                     
                     doc.add_heading("Delivery Approach", 3)
                     doc.add_paragraph(guide_section.get("delivery_approach", "Teaching methods"))
                     
-                    # Real Examples
                     doc.add_heading("Examples from Source Material", 3)
                     for example in guide_section.get("real_examples", []):
                         doc.add_paragraph(f"• {example}")
@@ -1525,7 +1490,6 @@ class DocumentGenerator:
                     for point in guide_section.get("key_points_to_emphasize", []):
                         doc.add_paragraph(f"• {point}")
                     
-                    # Interactive Activity
                     if "interactive_activity" in guide_section:
                         activity = guide_section["interactive_activity"]
                         doc.add_heading("Interactive Activity", 3)
@@ -1537,7 +1501,6 @@ class DocumentGenerator:
                             for material in activity['materials']:
                                 doc.add_paragraph(f"  • {material}")
                     
-                    # Q&A Section
                     doc.add_heading("Anticipated Questions & Answers", 3)
                     for qa in guide_section.get("anticipated_questions", []):
                         doc.add_paragraph(f"Q: {qa.get('question', '')}")
@@ -1564,34 +1527,61 @@ class DocumentGenerator:
             logger.error(f"Error saving trainer guide: {e}")
             raise
 
-class ProgressTracker:
+class EnhancedProgressTracker:
+    """Enhanced progress tracker with detailed step tracking"""
+    
     def __init__(self):
         self.status = "idle"
-        self.step = ""
-        self.progress = 0
-        self.max_progress = 100
+        self.current_step = ""
+        self.total_steps = 0
+        self.completed_steps = 0
+        self.progress_percent = 0
         self.message = ""
         self.start_time = None
         self.error = None
+        self.step_details = {}
+        self.substep_progress = 0
+        self.substep_total = 0
     
-    def start(self, max_steps: int = 100):
+    def start(self, total_steps: int):
         self.status = "running"
-        self.step = "initializing"
-        self.progress = 0
-        self.max_progress = max_steps
+        self.total_steps = total_steps
+        self.completed_steps = 0
+        self.progress_percent = 0
         self.message = "Starting process..."
         self.start_time = time.time()
         self.error = None
+        self.step_details = {}
     
-    def update(self, step: str, progress: int, message: str = ""):
-        self.step = step
-        self.progress = min(progress, self.max_progress)
-        self.message = message or f"Processing {step}..."
+    def update_step(self, step_name: str, message: str = "", substep: int = 0, substep_total: int = 0):
+        """Update current step with optional substep progress"""
+        self.current_step = step_name
+        self.message = message or f"Processing {step_name}..."
+        self.substep_progress = substep
+        self.substep_total = substep_total
+        
+        if self.total_steps > 0:
+            step_progress = self.completed_steps / self.total_steps
+            
+            if substep_total > 0:
+                substep_contribution = (substep / substep_total) / self.total_steps
+                self.progress_percent = int((step_progress + substep_contribution) * 100)
+            else:
+                self.progress_percent = int(step_progress * 100)
+        
+        logger.info(f"Progress: {self.progress_percent}% - {self.message}")
+    
+    def complete_step(self, step_name: str):
+        """Mark a step as completed"""
+        self.completed_steps += 1
+        self.step_details[step_name] = "completed"
+        self.update_step(step_name, f"Completed {step_name}")
     
     def complete(self, message: str = "Process completed successfully"):
         self.status = "complete"
-        self.progress = self.max_progress
+        self.progress_percent = 100
         self.message = message
+        self.completed_steps = self.total_steps
     
     def fail(self, error: str):
         self.status = "failed"
@@ -1602,15 +1592,25 @@ class ProgressTracker:
         elapsed = 0
         if self.start_time:
             elapsed = time.time() - self.start_time
+        
+        if self.progress_percent > 0 and self.progress_percent < 100:
+            estimated_total = elapsed / (self.progress_percent / 100)
+            remaining = estimated_total - elapsed
+        else:
+            remaining = 0
+        
         return {
             "status": self.status,
-            "step": self.step,
-            "progress": self.progress,
-            "max_progress": self.max_progress,
-            "percent": int(100 * self.progress / max(1, self.max_progress)),
+            "current_step": self.current_step,
+            "completed_steps": self.completed_steps,
+            "total_steps": self.total_steps,
+            "progress_percent": self.progress_percent,
             "message": self.message,
-            "elapsed": elapsed,
-            "error": self.error
+            "elapsed_seconds": elapsed,
+            "remaining_seconds": remaining,
+            "error": self.error,
+            "substep_progress": self.substep_progress,
+            "substep_total": self.substep_total
         }
 
 class TrainingGenerator:
@@ -1618,28 +1618,28 @@ class TrainingGenerator:
         self.document_processor = DocumentProcessor()
         self.content_analyzer = ContentAnalyzer(openai_api_key)
         self.document_generator = DocumentGenerator(openai_api_key, brand_config)
-        self.progress_tracker = ProgressTracker()
+        self.progress_tracker = EnhancedProgressTracker()
     
     def set_brand_config(self, brand_config: Dict):
         self.document_generator.set_brand_config(brand_config)
     
     async def process_document(self, file_path: Union[str, Path]) -> str:
-        self.progress_tracker.update("document_processing", 10, "Processing document...")
+        self.progress_tracker.update_step("document_processing", "Processing document...")
         content = self.document_processor.process_document(file_path)
         self.document_generator.set_source_content(content)
         return content
     
     async def analyze_content(self, content: str, duration: str = "1 day") -> Tuple[List[Dict], Dict]:
-        self.progress_tracker.update("topic_extraction", 20, "Extracting topics...")
+        self.progress_tracker.update_step("topic_extraction", "Extracting topics...")
         topics = self.content_analyzer.extract_topics(content)
         
-        self.progress_tracker.update("outline_generation", 30, "Generating outline...")
+        self.progress_tracker.update_step("outline_generation", "Generating outline...")
         outline = self.content_analyzer.generate_outline(topics, content, duration)
         
         return topics, outline
     
     async def analyze_quality(self, content: str, outline: Dict) -> Dict:
-        self.progress_tracker.update("quality_analysis", 35, "Analyzing content quality...")
+        self.progress_tracker.update_step("quality_analysis", "Analyzing content quality...")
         return self.content_analyzer.analyze_quality(content, outline)
     
     async def generate_materials(self, outline: Dict, output_dir: Union[str, Path], 
@@ -1649,26 +1649,25 @@ class TrainingGenerator:
         
         output_dir.mkdir(exist_ok=True, parents=True)
         
-        self.progress_tracker.update("slide_generation", 40, "Generating slides...")
+        self.progress_tracker.update_step("slide_generation", "Generating slides...")
         slides, assessments = await self.document_generator.generate_presentation(
             outline, max_slides_per_module, include_assessments
         )
         
-        # Calculate duration
         duration_info = calculate_training_duration(len(slides), "medium", include_assessments)
         
-        self.progress_tracker.update("presentation_creation", 60, "Creating PowerPoint...")
+        self.progress_tracker.update_step("presentation_creation", "Creating PowerPoint...")
         safe_title = outline.get('title', 'Training').replace(' ', '_').replace('/', '_')
         pptx_path = output_dir / f"{safe_title}.pptx"
         pptx_path = self.document_generator.create_powerpoint(slides, pptx_path)
         
-        self.progress_tracker.update("trainer_guide_creation", 75, "Creating trainer guide...")
+        self.progress_tracker.update_step("trainer_guide_creation", "Creating trainer guide...")
         guide_path = output_dir / f"{safe_title}_TrainerGuide.docx"
         guide_path = await self.document_generator.generate_trainer_guide(outline, slides, assessments, guide_path)
         
         assessment_path = None
         if include_assessments and assessments:
-            self.progress_tracker.update("assessment_creation", 85, "Creating assessment document...")
+            self.progress_tracker.update_step("assessment_creation", "Creating assessment document...")
             assessment_path = output_dir / f"{safe_title}_Assessment.docx"
             assessment_path = await self.document_generator.create_assessment_document(assessments, outline, assessment_path)
         
@@ -1687,17 +1686,28 @@ class TrainingGenerator:
                                          max_slides_per_module: int, include_assessments: bool = True,
                                          duration: str = "1 day") -> Dict:
         try:
-            self.progress_tracker.start(100)
+            total_steps = 7 if include_assessments else 6
+            self.progress_tracker.start(total_steps)
             
+            self.progress_tracker.update_step("document_processing", "Processing document...")
             content = await self.process_document(file_path)
+            self.progress_tracker.complete_step("document_processing")
             
             if not content or len(content.strip()) < 100:
                 raise ValueError("Insufficient content extracted from document")
             
+            self.progress_tracker.update_step("topic_extraction", "Analyzing content and extracting topics...")
             topics, outline = await self.analyze_content(content, duration)
-            quality_analysis = await self.analyze_quality(content, outline)
+            self.progress_tracker.complete_step("topic_extraction")
             
+            self.progress_tracker.update_step("quality_analysis", "Analyzing content quality...")
+            quality_analysis = await self.analyze_quality(content, outline)
+            self.progress_tracker.complete_step("quality_analysis")
+            
+            self.progress_tracker.update_step("material_generation", "Generating training materials...")
             result = await self.generate_materials(outline, output_dir, max_slides_per_module, include_assessments)
+            self.progress_tracker.complete_step("material_generation")
+            
             result["topics"] = topics
             result["outline"] = outline
             result["quality_analysis"] = quality_analysis
@@ -1711,7 +1721,6 @@ class TrainingGenerator:
             self.progress_tracker.fail(str(e))
             raise
 
-# Custom CSS for beautiful UI
 def load_custom_css():
     if not OPENAI_API_KEY:
         st.error("⚠️ API Key Not Configured")
@@ -1730,9 +1739,9 @@ def load_custom_css():
         - Set environment variable: `export OPENAI_API_KEY="your-key"`
         """)
         st.stop()
+    
     st.markdown("""
     <style>
-    /* Main theme colors */
     :root {
         --primary-color: #4F46E5;
         --secondary-color: #10B981;
@@ -1742,12 +1751,10 @@ def load_custom_css():
         --border-color: #E5E7EB;
     }
     
-    /* Main container styling */
     .main {
         background-color: var(--background-color);
     }
     
-    /* Card styling */
     .custom-card {
         background-color: var(--card-background);
         padding: 2rem;
@@ -1757,7 +1764,6 @@ def load_custom_css():
         border: 1px solid var(--border-color);
     }
     
-    /* File upload area */
     .upload-area {
         border: 2px dashed var(--border-color);
         border-radius: 0.5rem;
@@ -1772,7 +1778,6 @@ def load_custom_css():
         background-color: #EEF2FF;
     }
     
-    /* Button styling */
     .stButton>button {
         background-color: var(--primary-color);
         color: white;
@@ -1788,7 +1793,6 @@ def load_custom_css():
         box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
     }
     
-    /* Topic card styling */
     .topic-card {
         background: white;
         border: 1px solid var(--border-color);
@@ -1827,7 +1831,6 @@ def load_custom_css():
         color: #1E40AF;
     }
     
-    /* Module editor styling */
     .module-editor {
         background: white;
         border: 1px solid var(--border-color);
@@ -1845,12 +1848,10 @@ def load_custom_css():
         border-bottom: 1px solid var(--border-color);
     }
     
-    /* Progress bar styling */
     .stProgress > div > div {
         background-color: var(--primary-color);
     }
     
-    /* Info boxes */
     .info-box {
         padding: 1rem;
         border-radius: 0.5rem;
@@ -1876,7 +1877,6 @@ def load_custom_css():
         color: #92400E;
     }
     
-    /* Metric card */
     .metric-card {
         background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
         color: white;
@@ -1897,11 +1897,9 @@ def load_custom_css():
         opacity: 0.9;
     }
     
-    /* Hide Streamlit branding */
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
     
-    /* Headers */
     h1 {
         color: var(--text-color);
         font-weight: 700;
@@ -1916,6 +1914,79 @@ def load_custom_css():
     h3 {
         color: var(--text-color);
         font-weight: 500;
+    }
+    
+    /* Sidebar specific styles */
+    [data-testid="stSidebar"] {
+        background-color: #F8F9FA;
+    }
+    
+    [data-testid="stSidebar"] .element-container {
+        color: #1F2937;
+    }
+    
+    .sidebar-section-header {
+        color: #1F2937;
+        font-size: 1.25rem;
+        font-weight: 700;
+        margin: 1.5rem 0 1rem 0;
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        padding: 0.75rem;
+        background: white;
+        border-radius: 0.5rem;
+        border-left: 4px solid #667eea;
+    }
+    
+    .config-field-label {
+        color: #374151;
+        font-size: 0.875rem;
+        font-weight: 600;
+        margin-bottom: 0.5rem;
+        margin-top: 0.75rem;
+    }
+    
+    .enhancement-header {
+        color: #1F2937;
+        font-size: 1.25rem;
+        font-weight: 700;
+        margin: 1.5rem 0 1rem 0;
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        padding: 0.75rem;
+        background: white;
+        border-radius: 0.5rem;
+        border-left: 4px solid #F59E0B;
+    }
+    
+    .sidebar-divider {
+        border-top: 2px solid #E5E7EB;
+        margin: 1.5rem 0;
+    }
+    
+    .custom-input-label {
+        color: #374151;
+        font-size: 0.875rem;
+        font-weight: 600;
+        margin-bottom: 0.5rem;
+    }
+    
+    .input-helper-text {
+        color: #6B7280;
+        font-size: 0.75rem;
+        margin-top: 0.25rem;
+    }
+    
+    [data-testid="stSidebar"] label {
+        color: #1F2937 !important;
+        font-weight: 500;
+    }
+    
+    [data-testid="stSidebar"] .stSelectbox label {
+        color: #374151 !important;
+        font-weight: 600;
     }
     </style>
     """, unsafe_allow_html=True)
@@ -1937,7 +2008,6 @@ def render_step_indicator(current_step: str):
         step = steps[step_key]
         with col:
             if i < current_index:
-                # Completed step
                 st.markdown(f"""
                 <div style="text-align: center; padding: 1rem;">
                     <div style="width: 40px; height: 40px; border-radius: 50%; background-color: #10B981; color: white; 
@@ -1951,7 +2021,6 @@ def render_step_indicator(current_step: str):
                 </div>
                 """, unsafe_allow_html=True)
             elif i == current_index:
-                # Active step
                 st.markdown(f"""
                 <div style="text-align: center; padding: 1rem;">
                     <div style="width: 40px; height: 40px; border-radius: 50%; background-color: #4F46E5; color: white; 
@@ -1965,7 +2034,6 @@ def render_step_indicator(current_step: str):
                 </div>
                 """, unsafe_allow_html=True)
             else:
-                # Upcoming step
                 st.markdown(f"""
                 <div style="text-align: center; padding: 1rem;">
                     <div style="width: 40px; height: 40px; border-radius: 50%; background-color: #E5E7EB; color: #6B7280; 
@@ -2041,8 +2109,6 @@ def main():
         st.session_state.quality_analysis = {}
     if 'brand_config' not in st.session_state:
         st.session_state.brand_config = {}
-    
-    # Initialize additional session state for sidebar
     if 'training_type' not in st.session_state:
         st.session_state.training_type = "Auto-Detect"
     if 'session_duration' not in st.session_state:
@@ -2057,97 +2123,30 @@ def main():
         st.session_state.enhanced_speaker_notes = True
     if 'professional_templates' not in st.session_state:
         st.session_state.professional_templates = True
+    if 'duration_mode' not in st.session_state:
+        st.session_state.duration_mode = "Preset"
+    if 'slide_mode' not in st.session_state:
+        st.session_state.slide_mode = "Auto-Calculate"
+    if 'custom_duration_value' not in st.session_state:
+        st.session_state.custom_duration_value = 4
+    if 'custom_duration_unit' not in st.session_state:
+        st.session_state.custom_duration_unit = "Hours"
     
-    # Set API key from environment or hardcoded value (for backend configuration)
-    if not st.session_state.generator:
+    # Initialize generator
+    if 'generator' not in st.session_state or st.session_state.generator is None:
         try:
             st.session_state.generator = TrainingGenerator(
-            OPENAI_API_KEY,  # Use module-level variable
-            st.session_state.brand_config
-        )
+                OPENAI_API_KEY,
+                st.session_state.brand_config
+            )
+            logger.info("Generator initialized successfully")
         except Exception as e:
-            st.error(f"Error: {e}")
+            st.error(f"Error initializing generator: {e}")
+            logger.error(f"Generator initialization failed: {e}")
             st.stop()
     
-    # Sidebar configuration with modern design
+    # Sidebar configuration
     with st.sidebar:
-        st.markdown("""
-        <style>
-        /* Sidebar styling with light background and dark text */
-        [data-testid="stSidebar"] {
-            background-color: #F8F9FA;
-        }
-        
-        [data-testid="stSidebar"] .element-container {
-            color: #1F2937;
-        }
-        
-        /* Section headers */
-        .sidebar-section-header {
-            color: #1F2937;
-            font-size: 1.25rem;
-            font-weight: 700;
-            margin: 1.5rem 0 1rem 0;
-            display: flex;
-            align-items: center;
-            gap: 0.5rem;
-            padding: 0.75rem;
-            background: white;
-            border-radius: 0.5rem;
-            border-left: 4px solid #667eea;
-        }
-        
-        /* Configuration labels */
-        .config-field-label {
-            color: #374151;
-            font-size: 0.875rem;
-            font-weight: 600;
-            margin-bottom: 0.5rem;
-            margin-top: 0.75rem;
-        }
-        
-        /* Enhancement section */
-        .enhancement-header {
-            color: #1F2937;
-            font-size: 1.25rem;
-            font-weight: 700;
-            margin: 1.5rem 0 1rem 0;
-            display: flex;
-            align-items: center;
-            gap: 0.5rem;
-            padding: 0.75rem;
-            background: white;
-            border-radius: 0.5rem;
-            border-left: 4px solid #F59E0B;
-        }
-        
-        /* Divider */
-        .sidebar-divider {
-            border-top: 2px solid #E5E7EB;
-            margin: 1.5rem 0;
-        }
-        
-        /* Help icon styling */
-        .help-icon {
-            color: #6B7280;
-            cursor: help;
-        }
-        
-        /* Toggle labels */
-        [data-testid="stSidebar"] label {
-            color: #1F2937 !important;
-            font-weight: 500;
-        }
-        
-        /* Selectbox labels */
-        [data-testid="stSidebar"] .stSelectbox label {
-            color: #374151 !important;
-            font-weight: 600;
-        }
-        </style>
-        """, unsafe_allow_html=True)
-        
-        # Training Configuration Section
         st.markdown('<div class="sidebar-section-header">🎯 Training Configuration</div>', unsafe_allow_html=True)
         
         # Training Type
@@ -2172,89 +2171,151 @@ def main():
             help="Select training type or let AI auto-detect from your content"
         )
         
-        # Session Duration
+        # Session Duration with Custom Input
         st.markdown('<div class="config-field-label">Session Duration</div>', unsafe_allow_html=True)
-        duration_options = [
-            "30 Minutes",
-            "1 Hour",
-            "2 Hours",
-            "Half Day (4 hours)",
-            "Full Day (8 hours)",
-            "2 Days",
-            "3 Days",
-            "1 Week"
-        ]
-        st.session_state.session_duration = st.selectbox(
-            "Session Duration",
-            options=duration_options,
-            index=duration_options.index(st.session_state.session_duration),
+        
+        duration_mode = st.radio(
+            "Duration Mode",
+            options=["Preset", "Custom"],
+            horizontal=True,
             label_visibility="collapsed",
-            help="Target duration for your training program"
+            key="duration_mode_radio"
         )
         
-        # Map duration to internal format
-        duration_mapping = {
-            "30 Minutes": "30 minutes",
-            "1 Hour": "1 hour",
-            "2 Hours": "2 hours",
-            "Half Day (4 hours)": "half day",
-            "Full Day (8 hours)": "1 day",
-            "2 Days": "2 days",
-            "3 Days": "3 days",
-            "1 Week": "1 week"
-        }
-        st.session_state.training_duration = duration_mapping[st.session_state.session_duration]
-        
-        # Target Slide Count
-        st.markdown('<div class="config-field-label">Target Slide Count</div>', unsafe_allow_html=True)
-        slide_count_option = st.selectbox(
-            "Target Slide Count",
-            options=["Auto-calculated based on duration", "10-15 slides", "20-30 slides", "30-50 slides", "50+ slides"],
-            label_visibility="collapsed",
-            help="Number of slides to generate (auto-calculated recommended)"
-        )
-        
-        # Map slide count to slides per module
-        if "10-15" in slide_count_option:
-            st.session_state.max_slides_per_module = 5
-        elif "20-30" in slide_count_option:
-            st.session_state.max_slides_per_module = 8
-        elif "30-50" in slide_count_option:
-            st.session_state.max_slides_per_module = 12
-        elif "50+" in slide_count_option:
-            st.session_state.max_slides_per_module = 20
+        if duration_mode == "Preset":
+            duration_options = [
+                "30 Minutes",
+                "1 Hour",
+                "2 Hours",
+                "Half Day (4 hours)",
+                "Full Day (8 hours)",
+                "2 Days",
+                "3 Days",
+                "1 Week"
+            ]
+            selected_duration = st.selectbox(
+                "Select Duration",
+                options=duration_options,
+                index=3,
+                label_visibility="collapsed"
+            )
+            
+            duration_mapping = {
+                "30 Minutes": "30 minutes",
+                "1 Hour": "1 hour",
+                "2 Hours": "2 hours",
+                "Half Day (4 hours)": "half day",
+                "Full Day (8 hours)": "1 day",
+                "2 Days": "2 days",
+                "3 Days": "3 days",
+                "1 Week": "1 week"
+            }
+            st.session_state.training_duration = duration_mapping[selected_duration]
+            st.session_state.session_duration = selected_duration
         else:
-            # Auto-calculate based on duration - FIXED TO MATCH TARGET DURATION
-            # Calculate slides needed to fill the target duration
-            # Assume 5 minutes per slide average
+            col1, col2 = st.columns([3, 2])
+            with col1:
+                custom_duration_value = st.number_input(
+                    "Duration Value",
+                    min_value=1,
+                    max_value=100,
+                    value=st.session_state.custom_duration_value,
+                    label_visibility="collapsed",
+                    key="custom_duration_val"
+                )
+                st.session_state.custom_duration_value = custom_duration_value
+            with col2:
+                duration_unit = st.selectbox(
+                    "Unit",
+                    options=["Minutes", "Hours", "Days"],
+                    index=1,
+                    label_visibility="collapsed",
+                    key="custom_duration_unit_select"
+                )
+                st.session_state.custom_duration_unit = duration_unit
+            
+            st.session_state.session_duration = f"{custom_duration_value} {duration_unit}"
+            st.session_state.training_duration = f"{custom_duration_value} {duration_unit.lower()}"
+            
+            st.markdown(
+                f'<div class="input-helper-text">Total: {custom_duration_value} {duration_unit}</div>',
+                unsafe_allow_html=True
+            )
+        
+        # Target Slide Count with Custom Input
+        st.markdown('<div class="config-field-label">Target Slide Count</div>', unsafe_allow_html=True)
+        
+        slide_mode = st.radio(
+            "Slide Count Mode",
+            options=["Auto-Calculate", "Custom"],
+            horizontal=True,
+            label_visibility="collapsed",
+            key="slide_mode_radio"
+        )
+        
+        if slide_mode == "Auto-Calculate":
             duration_to_minutes = {
                 "30 minutes": 30,
                 "1 hour": 60,
                 "2 hours": 120,
-                "half day": 240,  # 4 hours
-                "1 day": 480,     # 8 hours
-                "2 days": 960,    # 16 hours
-                "3 days": 1440,   # 24 hours
-                "1 week": 2400    # 40 hours (5 days)
+                "half day": 240,
+                "1 day": 480,
+                "2 days": 960,
+                "3 days": 1440,
+                "1 week": 2400
             }
             
-            target_minutes = duration_to_minutes.get(st.session_state.training_duration, 240)
+            duration_str = st.session_state.training_duration
+            if "minutes" in duration_str:
+                target_minutes = int(duration_str.split()[0])
+            elif "hours" in duration_str:
+                target_minutes = int(duration_str.split()[0]) * 60
+            elif "days" in duration_str:
+                target_minutes = int(duration_str.split()[0]) * 480
+            else:
+                target_minutes = duration_to_minutes.get(duration_str, 240)
             
-            # Calculate total slides needed (5 min per slide + 20% for activities + breaks)
-            slides_needed = int(target_minutes / 5 * 0.75)  # 75% efficiency for activities/breaks
-            
-            # Estimate number of modules (will be adjusted after outline generation)
-            estimated_modules = min(5, max(3, slides_needed // 15))  # 3-5 modules typical
-            
-            # Calculate slides per module
+            slides_needed = int(target_minutes / 5 * 0.75)
+            estimated_modules = min(5, max(3, slides_needed // 15))
             st.session_state.max_slides_per_module = max(10, slides_needed // estimated_modules)
-            
-            # Store total target slides for later use
             st.session_state.target_total_slides = slides_needed
+            
+            st.info(f"📊 Auto-calculated: **{slides_needed} slides** (~{st.session_state.max_slides_per_module} per module)")
+        else:
+            col1, col2 = st.columns([3, 2])
+            with col1:
+                total_slides = st.number_input(
+                    "Total Slides",
+                    min_value=5,
+                    max_value=500,
+                    value=st.session_state.target_total_slides,
+                    step=5,
+                    help="Total number of slides to generate",
+                    key="custom_total_slides"
+                )
+            with col2:
+                num_modules = st.number_input(
+                    "Modules",
+                    min_value=1,
+                    max_value=20,
+                    value=3,
+                    help="Number of modules",
+                    key="custom_num_modules"
+                )
+            
+            st.session_state.target_total_slides = total_slides
+            st.session_state.max_slides_per_module = max(5, total_slides // num_modules)
+            
+            estimated_time = total_slides * 5
+            st.markdown(
+                f'<div class="input-helper-text">Est. time: {estimated_time//60}h {estimated_time%60}m '
+                f'(~{st.session_state.max_slides_per_module} slides/module)</div>',
+                unsafe_allow_html=True
+            )
         
         st.markdown('<div class="sidebar-divider"></div>', unsafe_allow_html=True)
         
-        # Enhancement Options Section
+        # Enhancement Options
         st.markdown('<div class="enhancement-header">✨ Enhancement Options</div>', unsafe_allow_html=True)
         
         st.session_state.include_activities = st.toggle(
@@ -2281,7 +2342,6 @@ def main():
             help="Use professionally designed slide layouts and themes"
         )
         
-        # Update include_assessments from enhanced options
         st.session_state.include_assessments = st.toggle(
             "Generate Assessments",
             value=st.session_state.get('include_assessments', True),
@@ -2339,21 +2399,37 @@ def main():
             """)
     
     # Main content area
-    LOGO_IMAGE_PATH = "logo_url.png"
-    st.image(
-                LOGO_IMAGE_PATH, 
-                caption=None, # No caption for a logo
-                width=150 # Adjust width as needed for a logo
-            )
-    st.title("QUINNS Training Generator Pro")
+    st.title("🎓 QUINNS Training Generator Pro")
+    
+    # Debug panel (collapsible) - helpful for troubleshooting
+    with st.expander("🔧 System Status", expanded=False):
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            api_status = "✅ Configured" if OPENAI_API_KEY else "❌ Not Set"
+            st.metric("API Key", api_status)
+        with col2:
+            gen_status = "✅ Initialized" if ('generator' in st.session_state and st.session_state.generator is not None) else "❌ Not Initialized"
+            st.metric("Generator", gen_status)
+        with col3:
+            st.metric("Current Step", st.session_state.step.title())
+        
+        if st.button("🔄 Reinitialize System"):
+            try:
+                st.session_state.generator = TrainingGenerator(
+                    OPENAI_API_KEY,
+                    st.session_state.brand_config
+                )
+                st.success("✅ System reinitialized successfully!")
+                time.sleep(1)
+                st.rerun()
+            except Exception as e:
+                st.error(f"❌ Reinitialization failed: {e}")
     
     # Render step indicator
     render_step_indicator(st.session_state.step)
-
     
     # STEP 1: Upload Documents
     if st.session_state.step == "upload":
-       
         st.markdown("## 📤 Upload Training Documents")
         st.markdown("Upload one or more documents to generate comprehensive training materials.")
         
@@ -2375,7 +2451,9 @@ def main():
             with col1:
                 if st.button("🚀 Process Documents", use_container_width=True):
                     if not st.session_state.api_key:
-                        st.error("⚠️ API key not configured. Please set OPENAI_API_KEY environment variable or update the code with your API key.")
+                        st.error("⚠️ API key not configured.")
+                    elif 'generator' not in st.session_state or st.session_state.generator is None:
+                        st.error("⚠️ System not initialized. Please refresh the page.")
                     else:
                         st.session_state.file_paths = []
                         for uploaded_file in uploaded_files:
@@ -2393,7 +2471,6 @@ def main():
                                 
                                 st.session_state.combined_content = combined_content
                                 
-                                # Auto-detect training type if set to Auto-Detect
                                 if st.session_state.training_type == "Auto-Detect":
                                     with st.spinner("🔍 Detecting training type..."):
                                         detected_type = st.session_state.generator.content_analyzer.detect_training_type(combined_content)
@@ -2409,15 +2486,11 @@ def main():
                                     st.error("❌ Could not extract content from documents")
                             except Exception as e:
                                 st.error(f"❌ Error: {str(e)}")
-        
-        st.markdown('</div>', unsafe_allow_html=True)
     
-    # STEP 2: Review Topics (with quality analysis)
+    # STEP 2: Review Topics
     elif st.session_state.step == "topics":
-        
         st.markdown("## 🎯 Content Analysis & Topic Review")
         
-        # Show detected/selected training type
         st.markdown(f"""
         <div class="info-box info">
             <strong>📋 Training Type:</strong> {st.session_state.training_type}<br>
@@ -2427,6 +2500,14 @@ def main():
         """, unsafe_allow_html=True)
         
         if not st.session_state.topics:
+            # Safety check
+            if 'generator' not in st.session_state or st.session_state.generator is None:
+                st.error("⚠️ System not initialized. Please go back and try again.")
+                if st.button("← Go Back"):
+                    st.session_state.step = "upload"
+                    st.rerun()
+                st.stop()
+            
             with st.spinner("🔍 Analyzing content and extracting topics..."):
                 try:
                     topics, outline = asyncio.run(
@@ -2438,7 +2519,6 @@ def main():
                     st.session_state.topics = topics
                     st.session_state.outline = outline
                     
-                    # Quality analysis
                     quality = asyncio.run(
                         st.session_state.generator.analyze_quality(
                             st.session_state.combined_content,
@@ -2449,12 +2529,12 @@ def main():
                     
                 except Exception as e:
                     st.error(f"❌ Error: {str(e)}")
+                    logger.error(f"Analysis error: {e}")
                     if st.button("← Go Back"):
                         st.session_state.step = "upload"
                         st.rerun()
         
         if st.session_state.topics and st.session_state.quality_analysis:
-            # Display quality metrics
             st.markdown("### Quality Analysis")
             
             qa = st.session_state.quality_analysis
@@ -2492,7 +2572,6 @@ def main():
                 </div>
                 """, unsafe_allow_html=True)
             
-            # Strengths and improvements
             col1, col2 = st.columns(2)
             
             with col1:
@@ -2507,7 +2586,6 @@ def main():
             
             st.markdown("---")
             
-            # Topic selection
             st.markdown("### Select Topics to Include")
             
             cols = st.columns(2)
@@ -2556,16 +2634,11 @@ def main():
                         st.rerun()
                     else:
                         st.warning("⚠️ Please select at least one topic")
-        
-        st.markdown('</div>', unsafe_allow_html=True)
     
     # STEP 3: Edit Outline
     elif st.session_state.step == "edit":
-        
-        
         st.markdown("## ✏️ Edit Training Outline")
         
-        # Estimate duration
         estimated_slides = sum(m.get('estimated_slides', 8) for m in st.session_state.outline.get('modules', []))
         duration_info = calculate_training_duration(estimated_slides, st.session_state.pace, st.session_state.include_assessments)
         
@@ -2577,7 +2650,6 @@ def main():
         </div>
         """, unsafe_allow_html=True)
         
-        # Training Overview
         st.markdown("### Training Overview")
         
         col1, col2 = st.columns(2)
@@ -2609,7 +2681,6 @@ def main():
         )
         st.session_state.outline['prerequisites'] = prerequisites
         
-        # Learning Objectives
         st.markdown("### Learning Objectives")
         
         objectives = st.session_state.outline.get('objectives', [])
@@ -2636,7 +2707,6 @@ def main():
         
         st.session_state.outline['objectives'] = objectives
         
-        # Modules
         st.markdown("### Training Modules")
         
         modules = st.session_state.outline.get('modules', [])
@@ -2659,7 +2729,6 @@ def main():
                         key=f"mod_duration_{mod_idx}"
                     )
                 
-                # Module objectives
                 st.markdown("**Module Objectives:**")
                 mod_objectives = module.get('objectives', [])
                 
@@ -2683,7 +2752,6 @@ def main():
                 
                 module['objectives'] = mod_objectives
                 
-                # Key Points
                 st.markdown("**Key Points:**")
                 key_points = module.get('key_points', [])
                 
@@ -2707,7 +2775,6 @@ def main():
                 
                 module['key_points'] = key_points
                 
-                # Delete module button
                 if st.button(f"Delete Module {mod_idx + 1}", key=f"del_mod_{mod_idx}"):
                     modules.pop(mod_idx)
                     st.rerun()
@@ -2740,13 +2807,17 @@ def main():
             if st.button("Generate Materials", type="primary", use_container_width=True):
                 st.session_state.step = "generate"
                 st.rerun()
-        
-        st.markdown('</div>', unsafe_allow_html=True)
     
-    # STEP 4: Generate Materials
+    # STEP 4: Generate Materials with Enhanced Progress
     elif st.session_state.step == "generate":
-        
         st.markdown("## ⚙️ Generating Training Materials")
+        
+        # Safety check - ensure generator is initialized
+        if 'generator' not in st.session_state or st.session_state.generator is None:
+            st.error("⚠️ Generator not initialized. Returning to previous step...")
+            time.sleep(2)
+            st.session_state.step = "edit"
+            st.rerun()
         
         output_dir = OUTPUT_DIR
         output_dir.mkdir(exist_ok=True)
@@ -2754,48 +2825,138 @@ def main():
         if 'generation_complete' not in st.session_state:
             st.session_state.generation_complete = False
             
-            progress_bar = st.progress(0)
-            status_text = st.empty()
+            progress_container = st.container()
+            status_container = st.container()
+            details_container = st.container()
+            
+            with progress_container:
+                progress_bar = st.progress(0)
+                progress_text = st.empty()
+            
+            with status_container:
+                status_col1, status_col2, status_col3 = st.columns(3)
+                with status_col1:
+                    current_step_display = st.empty()
+                with status_col2:
+                    elapsed_time_display = st.empty()
+                with status_col3:
+                    remaining_time_display = st.empty()
+            
+            with details_container:
+                detail_expander = st.expander("📊 Detailed Progress", expanded=True)
+                with detail_expander:
+                    detail_text = st.empty()
             
             try:
-                status_text.info("Initializing generation process...")
-                
                 temp_content_file = TEMP_DIR / "combined_content.txt"
                 with open(temp_content_file, "w", encoding="utf-8") as f:
                     f.write(st.session_state.combined_content)
                 
-                with st.spinner("Generating your training materials..."):
-                    result = asyncio.run(
-                        st.session_state.generator.generate_training_materials(
-                            temp_content_file,
-                            output_dir,
-                            st.session_state.max_slides_per_module,
-                            st.session_state.include_assessments,
-                            st.session_state.training_duration
-                        )
+                # Store generator reference to avoid session state issues in thread
+                generator = st.session_state.generator
+                max_slides = st.session_state.max_slides_per_module
+                include_assess = st.session_state.include_assessments
+                train_duration = st.session_state.training_duration
+                
+                async def generate_with_progress():
+                    result = await generator.generate_training_materials(
+                        temp_content_file,
+                        output_dir,
+                        max_slides,
+                        include_assess,
+                        train_duration
                     )
+                    return result
+                
+                result_queue = queue.Queue()
+                
+                def run_generation():
+                    try:
+                        result = asyncio.run(generate_with_progress())
+                        result_queue.put(("success", result))
+                    except Exception as e:
+                        logger.error(f"Generation error: {e}")
+                        result_queue.put(("error", str(e)))
+                
+                generation_thread = threading.Thread(target=run_generation)
+                generation_thread.start()
+                
+                last_update = time.time()
+                while generation_thread.is_alive() or not result_queue.empty():
+                    try:
+                        progress_info = generator.progress_tracker.get_info()
+                        
+                        # Update UI elements
+                        progress_bar.progress(min(progress_info['progress_percent'] / 100, 1.0))
+                        progress_text.markdown(f"**{progress_info['progress_percent']}%** - {progress_info['message']}")
+                        
+                        current_step_display.metric(
+                            "Current Step",
+                            progress_info['current_step'].replace('_', ' ').title() if progress_info['current_step'] else "Initializing"
+                        )
+                        
+                        elapsed_min = int(progress_info['elapsed_seconds'] // 60)
+                        elapsed_sec = int(progress_info['elapsed_seconds'] % 60)
+                        elapsed_time_display.metric(
+                            "Elapsed Time",
+                            f"{elapsed_min}m {elapsed_sec}s"
+                        )
+                        
+                        if progress_info['remaining_seconds'] > 0:
+                            remaining_min = int(progress_info['remaining_seconds'] // 60)
+                            remaining_sec = int(progress_info['remaining_seconds'] % 60)
+                            remaining_time_display.metric(
+                                "Est. Remaining",
+                                f"{remaining_min}m {remaining_sec}s"
+                            )
+                        
+                        detail_text.markdown(f"""
+                        **Status:** {progress_info['status'].upper()}  
+                        **Step:** {progress_info['current_step'].replace('_', ' ').title() if progress_info['current_step'] else "Initializing"}  
+                        **Progress:** {progress_info['completed_steps']}/{progress_info['total_steps']} steps completed  
+                        
+                        {progress_info['message']}
+                        """)
+                        
+                        # Check for completion
+                        if not result_queue.empty():
+                            status, data = result_queue.get()
+                            if status == "success":
+                                st.session_state.output_files = data
+                                st.session_state.generation_complete = True
+                                progress_bar.progress(1.0)
+                                progress_text.markdown("**100%** - ✅ Generation complete!")
+                                break
+                            else:
+                                raise Exception(data)
+                        
+                        time.sleep(0.5)
                     
-                    st.session_state.output_files = result
-                    st.session_state.generation_complete = True
-                    
-                    progress_bar.progress(100)
-                    status_text.success("Training materials generated successfully!")
-                    
+                    except Exception as inner_e:
+                        logger.error(f"Progress update error: {inner_e}")
+                        # Continue anyway to check result queue
+                        time.sleep(0.5)
+                
+                generation_thread.join()
+                
+                if st.session_state.generation_complete:
                     time.sleep(1)
                     st.rerun()
                     
             except Exception as e:
-                status_text.error(f"Error: {str(e)}")
+                st.error(f"❌ Error: {str(e)}")
+                logger.error(f"Generation failed with error: {e}")
                 if st.button("Try Again"):
+                    if 'generation_complete' in st.session_state:
+                        del st.session_state['generation_complete']
                     st.session_state.step = "edit"
                     st.rerun()
         
         if st.session_state.generation_complete:
             st.markdown('<div class="info-box success">', unsafe_allow_html=True)
-            st.markdown("### Success! Your training materials are ready.")
+            st.markdown("### ✅ Success! Your training materials are ready.")
             st.markdown('</div>', unsafe_allow_html=True)
             
-            # Display generation summary
             duration_info = st.session_state.output_files.get('duration_info', {})
             total_slides = st.session_state.output_files.get('total_slides', 0)
             
@@ -2825,7 +2986,7 @@ def main():
                 </div>
                 """, unsafe_allow_html=True)
             
-            st.markdown("### Download Your Materials")
+            st.markdown("### 📥 Download Your Materials")
             
             col1, col2, col3 = st.columns(3)
             
@@ -2835,7 +2996,7 @@ def main():
                     if os.path.exists(pptx_path):
                         with open(pptx_path, "rb") as f:
                             st.download_button(
-                                "Download PowerPoint",
+                                "📊 Download PowerPoint",
                                 f.read(),
                                 file_name=Path(pptx_path).name,
                                 mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
@@ -2848,7 +3009,7 @@ def main():
                     if os.path.exists(guide_path):
                         with open(guide_path, "rb") as f:
                             st.download_button(
-                                "Download Trainer Guide",
+                                "📖 Download Trainer Guide",
                                 f.read(),
                                 file_name=Path(guide_path).name,
                                 mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -2861,7 +3022,7 @@ def main():
                     if os.path.exists(assessment_path):
                         with open(assessment_path, "rb") as f:
                             st.download_button(
-                                "Download Assessment",
+                                "✅ Download Assessment",
                                 f.read(),
                                 file_name=Path(assessment_path).name,
                                 mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -2870,8 +3031,7 @@ def main():
             
             st.markdown("---")
             
-            if st.button("Start New Project", use_container_width=False):
-                # Reset all session state
+            if st.button("🔄 Start New Project", use_container_width=False):
                 keys_to_reset = [
                     'step', 'topics', 'outline', 'content', 'combined_content',
                     'output_files', 'file_paths', 'generation_complete',
@@ -2889,8 +3049,6 @@ def main():
                 st.session_state.include_assessments = True
                 st.session_state.pace = "medium"
                 st.rerun()
-        
-        st.markdown('</div>', unsafe_allow_html=True)
 
 if __name__ == "__main__":
     main()

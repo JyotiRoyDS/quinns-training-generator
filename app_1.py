@@ -2401,29 +2401,7 @@ def main():
     # Main content area
     st.title("🎓 QUINNS Training Generator Pro")
     
-    # Debug panel (collapsible) - helpful for troubleshooting
-    with st.expander("🔧 System Status", expanded=False):
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            api_status = "✅ Configured" if OPENAI_API_KEY else "❌ Not Set"
-            st.metric("API Key", api_status)
-        with col2:
-            gen_status = "✅ Initialized" if ('generator' in st.session_state and st.session_state.generator is not None) else "❌ Not Initialized"
-            st.metric("Generator", gen_status)
-        with col3:
-            st.metric("Current Step", st.session_state.step.title())
-        
-        if st.button("🔄 Reinitialize System"):
-            try:
-                st.session_state.generator = TrainingGenerator(
-                    OPENAI_API_KEY,
-                    st.session_state.brand_config
-                )
-                st.success("✅ System reinitialized successfully!")
-                time.sleep(1)
-                st.rerun()
-            except Exception as e:
-                st.error(f"❌ Reinitialization failed: {e}")
+    
     
     # Render step indicator
     render_step_indicator(st.session_state.step)
@@ -2937,11 +2915,33 @@ def main():
                         # Continue anyway to check result queue
                         time.sleep(0.5)
                 
-                generation_thread.join()
                 
-                if st.session_state.generation_complete:
+                # Wait for thread to complete with timeout
+                generation_thread.join(timeout=5)
+                
+                # CRITICAL FIX: Final check of queue after thread completes
+                # This ensures we don't miss the result if it was added right as the thread finished
+                if not result_queue.empty():
+                    try:
+                        status, data = result_queue.get_nowait()
+                        logger.info(f"Final queue check - Status: {status}")
+                        if status == "success":
+                            st.session_state.output_files = data
+                            st.session_state.generation_complete = True
+                            progress_bar.progress(1.0)
+                            progress_text.markdown("**100%** - ✅ Generation complete!")
+                            logger.info("Output files saved to session state")
+                        else:
+                            raise Exception(data)
+                    except queue.Empty:
+                        logger.warning("Queue was empty on final check")
+                
+                # Force rerun if generation completed
+                if st.session_state.get('generation_complete', False):
+                    logger.info("Triggering rerun to display results")
                     time.sleep(1)
                     st.rerun()
+                    
                     
             except Exception as e:
                 st.error(f"❌ Error: {str(e)}")

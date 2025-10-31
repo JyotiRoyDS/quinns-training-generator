@@ -1,3 +1,24 @@
+"""
+Enhanced Training Generator - Complete Production System with Modern UI
+A comprehensive AI-powered training material generator with 4-phase workflow
+
+Version: 3.2 Production (Enhanced UI + Theme Toggle + Secrets.toml)
+Author: QUINNS Training Services Limited
+License: Proprietary
+
+ENHANCEMENTS:
+- Dual theme support (Dark/Light mode toggle)
+- Color-coded importance levels
+- Improved text visibility throughout
+- Visible number input controls
+- Always-visible download icons
+- Auto-load API key from .streamlit/secrets.toml file
+"""
+
+# ============================================================================
+# IMPORTS
+# ============================================================================
+
 import streamlit as st
 import os
 import io
@@ -7,29 +28,20 @@ import time
 import base64
 import tempfile
 import shutil
+import zipfile
+import hashlib
+import logging
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import List, Dict, Tuple, Any, Optional, Union
 import asyncio
-import logging
 from concurrent.futures import ThreadPoolExecutor
-import threading
-import queue
+from functools import lru_cache, wraps
 
 # Document processing
 import pdfplumber
 import pytesseract
 from pdf2image import convert_from_path
-import docx
-from pptx import Presentation
-import pandas as pd
-
-# Basic NLP
-from sklearn.feature_extraction.text import CountVectorizer
-from sklearn.decomposition import LatentDirichletAllocation
-import numpy as np
-
-# Document generation
 from docx import Document as DocxDocument
 from docx.shared import RGBColor as DocxRGBColor, Pt as DocxPt, Inches as DocxInches
 from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -37,3018 +49,2737 @@ from pptx import Presentation as PptxPresentation
 from pptx.util import Inches, Pt
 from pptx.dml.color import RGBColor
 from pptx.enum.text import PP_ALIGN
+import pandas as pd
 
-# API - OpenAI 1.0+ compatible
+# NLP and ML
+from sklearn.feature_extraction.text import CountVectorizer
+from sklearn.decomposition import LatentDirichletAllocation
+import numpy as np
+
+# OpenAI API
 from openai import OpenAI
 from tenacity import retry, wait_exponential, stop_after_attempt, retry_if_exception_type
 
-def get_api_key():
-    """Load API key from Streamlit secrets or environment variable"""
-    # Try Streamlit secrets first (for cloud deployment)
-    try:
-        if hasattr(st, 'secrets') and 'OPENAI_API_KEY' in st.secrets:
-            api_key = st.secrets['OPENAI_API_KEY']
-            if api_key and api_key.strip():
-                return api_key.strip()
-    except Exception:
-        pass
-    
-    # Fall back to environment variable (for local development)
-    api_key = os.getenv('OPENAI_API_KEY')
-    if api_key and api_key.strip():
-        return api_key.strip()
-    
-    return None
+# ============================================================================
+# CONSTANTS & CONFIGURATION
+# ============================================================================
 
-OPENAI_API_KEY = get_api_key()
+# Version information
+VERSION = "3.2"
+BUILD_DATE = "2025-01-31"
+ORGANIZATION = "QUINNS Training Services Limited"
 
-# Set up logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-logger = logging.getLogger("QUINNS-TrainingGenerator")
+# API Configuration
+DEFAULT_MODEL = "gpt-4o"
+MAX_TOKENS = 4000
+TEMPERATURE = 0.7
 
-# Constants
-MAX_WORKERS = 3
-DEFAULT_TOPICS = 5
-DEFAULT_SLIDES_PER_TOPIC = 5
+# File constraints
+MAX_FILE_SIZE_MB = 50
+SUPPORTED_FORMATS = ['pdf', 'docx', 'pptx', 'txt', 'csv', 'xlsx', 'md']
 
-# Training duration constants (in minutes per slide)
-SLIDE_DURATION_MAP = {
-    "fast": 3,
-    "medium": 5,
-    "thorough": 8
+# Training duration to slide mapping
+DURATION_TO_SLIDES = {
+    "30 minutes": 8,
+    "1 hour": 12,
+    "2 hours": 20,
+    "half day": 30,
+    "1 day": 50,
+    "2 days": 80,
+    "3 days": 120,
+    "1 week": 200,
+    "2 weeks": 360,
+    "1 month": 720
 }
+
+# Module recommendations based on slides
+MODULE_RECOMMENDATIONS = {
+    (0, 50): 5,
+    (51, 120): 6,
+    (121, 200): 8,
+    (201, 360): 10,
+    (361, 720): 12,
+    (721, 9999): 15
+}
+
+# Template options
+TEMPLATE_OPTIONS = [
+    "Corporate - Professional",
+    "Technical - Detailed",
+    "Compliance - Regulatory",
+    "Sales - Persuasive",
+    "Academic - Educational",
+    "Workshop - Interactive"
+]
+
+# Phase identifiers
+PHASE_1 = "PHASE_1"
+PHASE_2 = "PHASE_2"
+PHASE_3 = "PHASE_3"
+PHASE_4 = "PHASE_4"
+
+# Logging configuration
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('training_generator.log'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger("EnhancedTrainingGenerator")
 
 # Create output directories
-try:
-    TEMP_DIR = Path.cwd() / "quinns_output"
-    os.makedirs(TEMP_DIR, exist_ok=True)
-    
-    CACHE_DIR = TEMP_DIR / "cache"
-    os.makedirs(CACHE_DIR, exist_ok=True)
-    
-    OUTPUT_DIR = TEMP_DIR / "output"
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-    
-    TEMPLATES_DIR = TEMP_DIR / "templates"
-    os.makedirs(TEMPLATES_DIR, exist_ok=True)
-    
-    logger.info(f"Created output directories at {TEMP_DIR}")
-except Exception as e:
-    logger.error(f"Failed to create output directories: {e}")
-    TEMP_DIR = Path(tempfile.gettempdir()) / "quinns_generator"
-    CACHE_DIR = TEMP_DIR / "cache"
-    OUTPUT_DIR = TEMP_DIR / "output"
-    TEMPLATES_DIR = TEMP_DIR / "templates"
-    os.makedirs(TEMP_DIR, exist_ok=True)
-    os.makedirs(CACHE_DIR, exist_ok=True)
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-    os.makedirs(TEMPLATES_DIR, exist_ok=True)
+OUTPUT_DIR = Path("output")
+OUTPUT_DIR.mkdir(exist_ok=True)
+CACHE_DIR = Path("cache")
+CACHE_DIR.mkdir(exist_ok=True)
+TEMP_DIR = Path("temp")
+TEMP_DIR.mkdir(exist_ok=True)
 
-# ENHANCED PROMPT TEMPLATES
-PROMPTS = {
-    "topic_extraction": """
-    Analyze this training document and extract the main topics covered.
-    Return a JSON object with specific, concrete topics found in the document.
-    
-    DOCUMENT CONTENT:
-    {content}
-    
-    Return format:
-    {{
-        "topics": [
-            {{
-                "title": "Specific topic name from document",
-                "description": "What this topic actually covers in the document",
-                "importance": "high/medium/low",
-                "key_concepts": ["concept1", "concept2", "concept3"],
-                "estimated_duration_minutes": 30
-            }}
-        ]
-    }}
-    """,
-    
-    "outline_generation": """
-    Create a detailed training outline based on the following content.
-    Extract real information from the document to create specific, actionable learning objectives and content.
-    
-    TOPICS IDENTIFIED:
-    {topics}
-    
-    DOCUMENT CONTENT:
-    {content}
-    
-    TRAINING DURATION: {duration}
-    
-    Return a JSON object with this structure:
-    {{
-        "title": "Descriptive training title based on content",
-        "description": "What this training actually teaches",
-        "target_audience": "Who needs this training",
-        "prerequisites": "What learners should know beforehand",
-        "difficulty_level": "beginner/intermediate/advanced",
-        "estimated_duration_hours": 8,
-        "objectives": [
-            "Specific, measurable learning outcome 1",
-            "Specific, measurable learning outcome 2"
-        ],
-        "modules": [
-            {{
-                "title": "Module title from content",
-                "duration": "30-60 minutes",
-                "difficulty": "beginner/intermediate/advanced",
-                "objectives": ["What learners will achieve in this module"],
-                "topics": ["Specific topics covered"],
-                "key_points": ["Actual facts/concepts from document"],
-                "activities": ["Specific practice activities"],
-                "estimated_slides": 8
-            }}
-        ]
-    }}
-    
-    Focus on extracting REAL information from the document, not generic placeholders.
-    """,
-    
-    "slide_generation": """
-    Generate {num_slides} slides with specific content from the source material.
+# ============================================================================
+# THEME SYSTEM - DARK AND LIGHT MODE
+# ============================================================================
 
-    TOPIC: {topic}
-    NUMBER OF SLIDES: {num_slides}
-    DIFFICULTY: {difficulty}
-
-    SOURCE CONTEXT:
-    {context}
-
-    ALREADY COVERED (avoid repeating):
-    {previous_context}
-
-    INSTRUCTIONS:
-    1. Extract real facts, procedures, and examples from SOURCE CONTEXT
-    2. Each slide covers DIFFERENT information
-    3. Write complete sentences with specific details
-    4. Include examples and real-world applications
-    5. Notes must be 150+ words with teaching content
-
-    Return a JSON object with this exact structure:
-    {{
-        "slides": [
-            {{
-                "slide_type": "content",
-                "title": "Specific topic title",
-                "content": [
-                    "Point 1 with specific information",
-                    "Point 2 with details",
-                    "Point 3 with examples",
-                    "Point 4 with key takeaway"
-                ],
-                "notes": "Detailed teaching notes with specific information, examples, and explanations from the source material. Minimum 150 words.",
-                "estimated_time_minutes": 5
-            }}
-        ]
-    }}
+def get_theme_css(theme: str = "dark") -> str:
+    """Generate CSS based on selected theme."""
     
-    IMPORTANT: Return ONLY valid JSON with a "slides" array. No extra text.
-    """,
+    if theme == "light":
+        return """
+<style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700;800&display=swap');
     
-    "assessment_generation": """
-    Create comprehensive assessment questions based on the training content.
-    
-    MODULE CONTENT:
-    {module_content}
-    
-    LEARNING OBJECTIVES:
-    {objectives}
-    
-    DIFFICULTY LEVEL: {difficulty}
-    NUMBER OF QUESTIONS: {num_questions}
-    
-    Generate a mix of question types that assess understanding of the material.
-    
-    Return JSON:
-    {{
-        "questions": [
-            {{
-                "type": "multiple_choice",
-                "question": "Specific question based on content",
-                "options": ["Option A", "Option B", "Option C", "Option D"],
-                "correct_answer": "Option B",
-                "explanation": "Why this is correct and others are wrong",
-                "difficulty": "easy/medium/hard",
-                "learning_objective": "Which objective this assesses"
-            }},
-            {{
-                "type": "true_false",
-                "question": "Statement to evaluate",
-                "correct_answer": true,
-                "explanation": "Explanation of the correct answer"
-            }},
-            {{
-                "type": "scenario",
-                "scenario": "Real-world situation description",
-                "question": "What should you do?",
-                "suggested_answer": "Detailed response with key points",
-                "rubric": ["Criterion 1", "Criterion 2", "Criterion 3"]
-            }}
-        ]
-    }}
-    """,
-    
-    "activity_generation": """
-    Create engaging learning activities based on the module content.
-    
-    MODULE: {module_title}
-    CONTENT: {module_content}
-    DURATION: {duration} minutes
-    
-    Generate practical, hands-on activities that reinforce learning.
-    
-    Return JSON:
-    {{
-        "activities": [
-            {{
-                "type": "case_study",
-                "title": "Activity title",
-                "description": "What participants will do",
-                "scenario": "Detailed realistic scenario",
-                "instructions": ["Step 1", "Step 2", "Step 3"],
-                "discussion_questions": ["Question 1", "Question 2"],
-                "duration_minutes": 15,
-                "group_size": "2-4 people"
-            }},
-            {{
-                "type": "role_play",
-                "title": "Activity title",
-                "roles": ["Role 1", "Role 2"],
-                "scenario": "Situation to act out",
-                "objectives": ["What to demonstrate"],
-                "debrief_questions": ["Reflection question"]
-            }}
-        ]
-    }}
-    """,
-    
-    "quality_analysis": """
-    Analyze the quality and completeness of this training content.
-    
-    CONTENT:
-    {content}
-    
-    OUTLINE:
-    {outline}
-    
-    Evaluate on:
-    - Content clarity and completeness
-    - Learning objective alignment
-    - Appropriate difficulty level
-    - Engagement potential
-    - Practical applicability
-    
-    Return JSON:
-    {{
-        "overall_score": 85,
-        "readability_score": 75,
-        "completeness_score": 90,
-        "engagement_score": 80,
-        "strengths": ["Strength 1", "Strength 2"],
-        "improvements": ["Suggestion 1", "Suggestion 2"],
-        "missing_topics": ["Topic that should be covered"],
-        "recommendations": ["Recommendation 1", "Recommendation 2"]
-    }}
-    """,
-    
-    "trainer_guide": """
-    Create COMPREHENSIVE trainer guide content with ACTUAL teaching material.
-
-    MODULE CONTEXT: {module}
-    SLIDE: {slide}
-
-    Generate a detailed trainer guide section with:
-
-    1. WHAT TO TEACH: The actual content (facts, procedures, concepts)
-    2. HOW TO TEACH IT: Delivery methods and techniques
-    3. EXAMPLES: Real examples from the source material
-    4. PRACTICE: Hands-on exercises or discussions
-    5. Q&A: Likely questions with complete answers
-
-    Return JSON:
-    {{
-        "title": "Section title from slide",
-        "teaching_content": "3-4 paragraphs of the ACTUAL information the trainer should teach - include all facts, procedures, definitions, examples from the source material. This should be substantial enough that a trainer could teach from this alone. Minimum 300 words with specific details, not generic guidance.",
-        "delivery_approach": "Specific teaching methods for this content (lecture, demonstration, discussion, etc.) with timing breakdown",
-        "real_examples": [
-            "Specific example 1 with full context and details from source material",
-            "Specific example 2 from source material with concrete information",
-            "Case study or scenario with complete information and real data"
-        ],
-        "key_points_to_emphasize": [
-            "Critical fact/concept with detailed explanation",
-            "Important procedure/process with complete step-by-step breakdown",
-            "Common misconception to address with correction"
-        ],
-        "interactive_activity": {{
-            "activity_type": "Type of activity (discussion, exercise, demo, etc.)",
-            "instructions": "Complete step-by-step instructions with specific details",
-            "duration": "X minutes",
-            "materials": ["specific", "materials", "needed"]
-        }},
-        "anticipated_questions": [
-            {{
-                "question": "Specific question learners might ask",
-                "detailed_answer": "Complete, thorough answer with examples and explanation (minimum 100 words)"
-            }},
-            {{
-                "question": "Another likely question",
-                "detailed_answer": "Another detailed response"
-            }}
-        ],
-        "assessment_checkpoint": "Quick knowledge check question or exercise with answer",
-        "timing_guidance": "X-Y minutes with breakdown of time allocation",
-        "transitions": "How to transition from previous slide and set up next slide"
-    }}
-
-    CRITICAL: This must contain ACTUAL teaching content with real information, not meta-instructions about what to teach.
-    """
-}
-
-# TRAINING TEMPLATES
-TRAINING_TEMPLATES = {
-    "corporate": {
-        "name": "Corporate Training",
-        "description": "Professional business training format",
-        "colors": {
-            "primary": "4F46E5",
-            "secondary": "10B981",
-            "accent": "F59E0B"
-        },
-        "style": "formal",
-        "includes_assessments": True,
-        "includes_activities": True
-    },
-    "technical": {
-        "name": "Technical Skills",
-        "description": "Hands-on technical training",
-        "colors": {
-            "primary": "3B82F6",
-            "secondary": "8B5CF6",
-            "accent": "EC4899"
-        },
-        "style": "detailed",
-        "includes_assessments": True,
-        "includes_activities": True
-    },
-    "compliance": {
-        "name": "Compliance & Safety",
-        "description": "Regulatory and safety training",
-        "colors": {
-            "primary": "EF4444",
-            "secondary": "F59E0B",
-            "accent": "10B981"
-        },
-        "style": "structured",
-        "includes_assessments": True,
-        "includes_activities": False
-    },
-    "onboarding": {
-        "name": "New Employee Onboarding",
-        "description": "Welcome and orientation training",
-        "colors": {
-            "primary": "10B981",
-            "secondary": "3B82F6",
-            "accent": "F59E0B"
-        },
-        "style": "welcoming",
-        "includes_assessments": False,
-        "includes_activities": True
-    },
-    "leadership": {
-        "name": "Leadership Development",
-        "description": "Management and leadership skills",
-        "colors": {
-            "primary": "7C3AED",
-            "secondary": "EC4899",
-            "accent": "F59E0B"
-        },
-        "style": "inspirational",
-        "includes_assessments": True,
-        "includes_activities": True
+    :root {
+        --primary-color: #667eea;
+        --secondary-color: #764ba2;
+        --accent-pink: #f093fb;
+        --accent-blue: #4facfe;
+        --success-color: #10b981;
+        --warning-color: #f59e0b;
+        --error-color: #ef4444;
+        --text-primary: #1e293b;
+        --text-secondary: #334155;
+        --text-muted: #64748b;
+        --bg-primary: #ffffff;
+        --bg-secondary: #f8fafc;
+        --glass-bg: rgba(255, 255, 255, 0.9);
+        --glass-border: rgba(0, 0, 0, 0.1);
+        --shadow-color: rgba(0, 0, 0, 0.1);
     }
-}
+    
+    * {
+        font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    }
+    
+    .main {
+        background: transparent;
+    }
+    
+    .stApp {
+        background: linear-gradient(135deg, #f0f9ff 0%, #e0e7ff 25%, #ede9fe 50%, #fae8ff 75%, #fef3c7 100%);
+        background-size: 200% 200%;
+        animation: gradient 15s ease infinite;
+        min-height: 100vh;
+    }
+    
+    @keyframes gradient {
+        0% { background-position: 0% 50%; }
+        50% { background-position: 100% 50%; }
+        100% { background-position: 0% 50%; }
+    }
+    
+    /* Text visibility */
+    h1, h2, h3, h4, h5, h6 {
+        color: var(--text-primary) !important;
+        font-weight: 700 !important;
+    }
+    
+    p, span, div:not(.stApp), label, li, td, th, a {
+        color: var(--text-secondary) !important;
+    }
+    
+    strong, b {
+        color: var(--text-primary) !important;
+        font-weight: 700 !important;
+    }
+    
+    .stMarkdown, .stText {
+        color: var(--text-primary) !important;
+    }
+    
+    .caption, small, .stCaption {
+        color: var(--text-muted) !important;
+    }
+    
+    /* Input fields */
+    .stTextInput input, 
+    .stTextArea textarea, 
+    .stNumberInput input,
+    .stSelectbox select {
+        color: var(--text-primary) !important;
+        background-color: var(--bg-primary) !important;
+        border: 2px solid var(--glass-border) !important;
+        border-radius: 10px !important;
+        padding: 12px 16px !important;
+    }
+    
+    .stTextInput input:focus, 
+    .stTextArea textarea:focus,
+    .stNumberInput input:focus,
+    .stSelectbox select:focus {
+        border-color: var(--primary-color) !important;
+        box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.2) !important;
+    }
+    
+    /* Number input controls - VISIBLE */
+    .stNumberInput button {
+        color: var(--primary-color) !important;
+        background: var(--bg-secondary) !important;
+        border: 1px solid var(--glass-border) !important;
+        font-weight: 700 !important;
+        font-size: 18px !important;
+    }
+    
+    .stNumberInput button:hover {
+        background: var(--primary-color) !important;
+        color: white !important;
+    }
+    
+    /* Input labels */
+    .stTextInput label,
+    .stTextArea label,
+    .stNumberInput label,
+    .stSelectbox label,
+    .stSlider label,
+    .stCheckbox label {
+        color: var(--text-primary) !important;
+        font-weight: 600 !important;
+    }
+    
+    /* Info boxes */
+    .stInfo {
+        background: rgba(59, 130, 246, 0.1) !important;
+        border-left: 4px solid #3b82f6 !important;
+        color: var(--text-primary) !important;
+    }
+    
+    .stSuccess {
+        background: rgba(16, 185, 129, 0.1) !important;
+        border-left: 4px solid var(--success-color) !important;
+        color: var(--text-primary) !important;
+    }
+    
+    .stWarning {
+        background: rgba(245, 158, 11, 0.1) !important;
+        border-left: 4px solid var(--warning-color) !important;
+        color: var(--text-primary) !important;
+    }
+    
+    .stError {
+        background: rgba(239, 68, 68, 0.1) !important;
+        border-left: 4px solid var(--error-color) !important;
+        color: var(--text-primary) !important;
+    }
+    
+    /* Expanders */
+    .streamlit-expanderHeader {
+        background: var(--bg-primary) !important;
+        border: 2px solid var(--glass-border) !important;
+        color: var(--text-primary) !important;
+        font-weight: 600 !important;
+    }
+    
+    .streamlit-expanderHeader:hover {
+        background: var(--bg-secondary) !important;
+        border-color: var(--primary-color) !important;
+    }
+    
+    .streamlit-expanderContent {
+        background: var(--bg-secondary) !important;
+        border: 2px solid var(--glass-border) !important;
+        border-top: none !important;
+        color: var(--text-primary) !important;
+    }
+    
+    /* Metrics */
+    .stMetric {
+        background: var(--bg-primary) !important;
+        border: 2px solid var(--glass-border) !important;
+        border-radius: 12px !important;
+        padding: 20px !important;
+    }
+    
+    .stMetric:hover {
+        border-color: var(--primary-color) !important;
+        box-shadow: 0 4px 12px var(--shadow-color) !important;
+    }
+    
+    .stMetric label {
+        color: var(--text-muted) !important;
+    }
+    
+    .stMetric [data-testid="stMetricValue"] {
+        color: var(--text-primary) !important;
+        font-weight: 800 !important;
+    }
+    
+    /* Buttons */
+    .stButton button {
+        background: linear-gradient(135deg, var(--primary-color), var(--secondary-color)) !important;
+        color: white !important;
+        border: none !important;
+        border-radius: 12px !important;
+        padding: 12px 24px !important;
+        font-weight: 600 !important;
+        box-shadow: 0 4px 12px rgba(102, 126, 234, 0.3) !important;
+    }
+    
+    .stButton button:hover {
+        transform: translateY(-2px) !important;
+        box-shadow: 0 6px 20px rgba(102, 126, 234, 0.5) !important;
+    }
+    
+    /* Download buttons - ALWAYS VISIBLE */
+    .stDownloadButton button {
+        background: linear-gradient(135deg, #10b981, #059669) !important;
+        color: white !important;
+        border: none !important;
+        font-weight: 600 !important;
+        box-shadow: 0 4px 12px rgba(16, 185, 129, 0.3) !important;
+    }
+    
+    .stDownloadButton button:before {
+        content: "📥 ";
+        font-size: 20px;
+        margin-right: 8px;
+    }
+    
+    .stDownloadButton button:hover {
+        background: linear-gradient(135deg, #059669, #047857) !important;
+        transform: translateY(-2px) !important;
+    }
+    
+    /* File uploader */
+    .stFileUploader {
+        background: var(--bg-primary) !important;
+        border: 2px dashed var(--glass-border) !important;
+        border-radius: 16px !important;
+        padding: 32px !important;
+    }
+    
+    .stFileUploader:hover {
+        border-color: var(--primary-color) !important;
+    }
+    
+    /* Progress bar */
+    .stProgress > div > div {
+        background: linear-gradient(90deg, var(--primary-color), var(--accent-pink)) !important;
+    }
+    
+    .stProgress > div {
+        background: rgba(0, 0, 0, 0.1) !important;
+    }
+    
+    /* Tabs */
+    .stTabs [data-baseweb="tab-list"] {
+        background: var(--bg-primary);
+        border: 2px solid var(--glass-border);
+        border-radius: 12px;
+        padding: 8px;
+    }
+    
+    .stTabs [data-baseweb="tab"] {
+        color: var(--text-muted) !important;
+        font-weight: 600 !important;
+    }
+    
+    .stTabs [aria-selected="true"] {
+        background: linear-gradient(135deg, var(--primary-color), var(--secondary-color)) !important;
+        color: white !important;
+    }
+    
+    /* Sidebar */
+    section[data-testid="stSidebar"] {
+        background: var(--bg-secondary) !important;
+        border-right: 2px solid var(--glass-border) !important;
+    }
+    
+    section[data-testid="stSidebar"] * {
+        color: var(--text-secondary) !important;
+    }
+    
+    section[data-testid="stSidebar"] h1,
+    section[data-testid="stSidebar"] h2,
+    section[data-testid="stSidebar"] h3 {
+        color: var(--text-primary) !important;
+    }
+    
+    /* Phase badges */
+    .phase-badge {
+        display: inline-block;
+        padding: 10px 20px;
+        border-radius: 25px;
+        font-weight: 600;
+        font-size: 14px;
+        margin: 8px 0;
+        text-align: center;
+    }
+    
+    .phase-active {
+        background: linear-gradient(135deg, var(--primary-color), var(--secondary-color));
+        color: white !important;
+        box-shadow: 0 4px 15px rgba(102, 126, 234, 0.4);
+    }
+    
+    .phase-complete {
+        background: linear-gradient(135deg, var(--success-color), #059669);
+        color: white !important;
+    }
+    
+    .phase-pending {
+        background: var(--bg-secondary);
+        color: var(--text-muted) !important;
+        border: 2px solid var(--glass-border);
+    }
+    
+    /* Importance badges - COLOR CODED */
+    .importance-high {
+        background: linear-gradient(135deg, #ef4444, #dc2626) !important;
+        color: white !important;
+        padding: 4px 12px;
+        border-radius: 20px;
+        font-weight: 600;
+        display: inline-block;
+    }
+    
+    .importance-medium {
+        background: linear-gradient(135deg, #f59e0b, #d97706) !important;
+        color: white !important;
+        padding: 4px 12px;
+        border-radius: 20px;
+        font-weight: 600;
+        display: inline-block;
+    }
+    
+    .importance-low {
+        background: linear-gradient(135deg, #3b82f6, #2563eb) !important;
+        color: white !important;
+        padding: 4px 12px;
+        border-radius: 20px;
+        font-weight: 600;
+        display: inline-block;
+    }
+    
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
+    header {visibility: hidden;}
+    
+    .block-container {
+        padding-top: 2rem !important;
+        max-width: 1200px !important;
+    }
+</style>
+"""
+    else:  # Dark theme
+        return """
+<style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700;800&display=swap');
+    
+    :root {
+        --primary-color: #667eea;
+        --secondary-color: #764ba2;
+        --accent-pink: #f093fb;
+        --accent-blue: #4facfe;
+        --success-color: #10b981;
+        --warning-color: #fbbf24;
+        --error-color: #ef4444;
+        --text-primary: #ffffff;
+        --text-secondary: rgba(255, 255, 255, 0.95);
+        --text-muted: rgba(255, 255, 255, 0.7);
+        --glass-bg: rgba(30, 27, 75, 0.6);
+        --glass-border: rgba(255, 255, 255, 0.15);
+        --shadow-color: rgba(102, 126, 234, 0.3);
+    }
+    
+    * {
+        font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    }
+    
+    .main {
+        background: transparent;
+    }
+    
+    .stApp {
+        background: linear-gradient(135deg, #0f172a 0%, #1e1b4b 25%, #581c87 50%, #1e3a8a 75%, #0f172a 100%);
+        background-size: 200% 200%;
+        animation: gradient 10s ease infinite;
+        min-height: 100vh;
+    }
+    
+    @keyframes gradient {
+        0% { background-position: 0% 50%; }
+        50% { background-position: 100% 50%; }
+        100% { background-position: 0% 50%; }
+    }
+    
+    /* Text visibility */
+    h1, h2, h3, h4, h5, h6 {
+        color: var(--text-primary) !important;
+        font-weight: 700 !important;
+        text-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
+    }
+    
+    p, span, div:not(.stApp), label, li, td, th, a {
+        color: var(--text-secondary) !important;
+    }
+    
+    strong, b {
+        color: var(--text-primary) !important;
+        font-weight: 700 !important;
+    }
+    
+    .stMarkdown, .stText {
+        color: var(--text-primary) !important;
+    }
+    
+    .caption, small, .stCaption {
+        color: var(--text-muted) !important;
+    }
+    
+    /* Input fields */
+    .stTextInput input, 
+    .stTextArea textarea, 
+    .stNumberInput input,
+    .stSelectbox select {
+        color: white !important;
+        background-color: rgba(30, 27, 75, 0.6) !important;
+        border: 1px solid var(--glass-border) !important;
+        border-radius: 10px !important;
+        padding: 12px 16px !important;
+    }
+    
+    .stTextInput input:focus, 
+    .stTextArea textarea:focus,
+    .stNumberInput input:focus,
+    .stSelectbox select:focus {
+        background-color: rgba(30, 27, 75, 0.8) !important;
+        border-color: var(--primary-color) !important;
+        box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.2) !important;
+    }
+    
+    /* Number input controls - HIGHLY VISIBLE */
+    .stNumberInput button {
+        color: #667eea !important;
+        background: rgba(102, 126, 234, 0.2) !important;
+        border: 2px solid #667eea !important;
+        font-weight: 900 !important;
+        font-size: 20px !important;
+        border-radius: 6px !important;
+    }
+    
+    .stNumberInput button:hover {
+        background: linear-gradient(135deg, #667eea, #764ba2) !important;
+        color: white !important;
+        transform: scale(1.1);
+    }
+    
+    /* Input labels */
+    .stTextInput label,
+    .stTextArea label,
+    .stNumberInput label,
+    .stSelectbox label,
+    .stSlider label,
+    .stCheckbox label {
+        color: var(--text-primary) !important;
+        font-weight: 600 !important;
+    }
+    
+    /* Info boxes */
+    .stInfo {
+        background: rgba(59, 130, 246, 0.15) !important;
+        border-left: 4px solid #3b82f6 !important;
+        color: white !important;
+    }
+    
+    .stSuccess {
+        background: rgba(16, 185, 129, 0.15) !important;
+        border-left: 4px solid var(--success-color) !important;
+        color: white !important;
+    }
+    
+    .stWarning {
+        background: rgba(251, 191, 36, 0.15) !important;
+        border-left: 4px solid var(--warning-color) !important;
+        color: white !important;
+    }
+    
+    .stError {
+        background: rgba(239, 68, 68, 0.15) !important;
+        border-left: 4px solid var(--error-color) !important;
+        color: white !important;
+    }
+    
+    /* Expanders */
+    .streamlit-expanderHeader {
+        background: rgba(30, 27, 75, 0.6) !important;
+        border: 1px solid var(--glass-border) !important;
+        color: white !important;
+        font-weight: 600 !important;
+    }
+    
+    .streamlit-expanderHeader:hover {
+        background: rgba(102, 126, 234, 0.2) !important;
+        border-color: var(--primary-color) !important;
+    }
+    
+    .streamlit-expanderContent {
+        background: rgba(30, 27, 75, 0.4) !important;
+        border: 1px solid var(--glass-border) !important;
+        border-top: none !important;
+        color: white !important;
+    }
+    
+    /* Metrics */
+    .stMetric {
+        background: rgba(30, 27, 75, 0.6) !important;
+        border: 1px solid var(--glass-border) !important;
+        border-radius: 12px !important;
+        padding: 20px !important;
+    }
+    
+    .stMetric:hover {
+        border-color: var(--primary-color) !important;
+        box-shadow: 0 8px 25px var(--shadow-color) !important;
+    }
+    
+    .stMetric label {
+        color: var(--text-muted) !important;
+    }
+    
+    .stMetric [data-testid="stMetricValue"] {
+        color: var(--text-primary) !important;
+        font-weight: 800 !important;
+    }
+    
+    /* Buttons */
+    .stButton button {
+        background: linear-gradient(135deg, var(--primary-color), var(--secondary-color)) !important;
+        color: white !important;
+        border: none !important;
+        border-radius: 12px !important;
+        padding: 12px 24px !important;
+        font-weight: 600 !important;
+        box-shadow: 0 4px 15px rgba(102, 126, 234, 0.4) !important;
+    }
+    
+    .stButton button:hover {
+        transform: translateY(-2px) !important;
+        box-shadow: 0 6px 20px rgba(102, 126, 234, 0.6) !important;
+    }
+    
+    /* Download buttons - ALWAYS VISIBLE WITH GRADIENT */
+    .stDownloadButton button {
+        background: linear-gradient(135deg, #10b981, #059669) !important;
+        color: white !important;
+        border: none !important;
+        font-weight: 600 !important;
+        box-shadow: 0 4px 15px rgba(16, 185, 129, 0.4) !important;
+    }
+    
+    .stDownloadButton button:before {
+        content: "📥 ";
+        font-size: 20px;
+        margin-right: 8px;
+    }
+    
+    .stDownloadButton button:hover {
+        background: linear-gradient(135deg, #059669, #047857) !important;
+        transform: translateY(-2px) !important;
+        box-shadow: 0 6px 25px rgba(16, 185, 129, 0.6) !important;
+    }
+    
+    /* File uploader */
+    .stFileUploader {
+        background: rgba(30, 27, 75, 0.6) !important;
+        border: 2px dashed var(--glass-border) !important;
+        border-radius: 16px !important;
+        padding: 32px !important;
+    }
+    
+    .stFileUploader:hover {
+        border-color: var(--primary-color) !important;
+    }
+    
+    /* Progress bar */
+    .stProgress > div > div {
+        background: linear-gradient(90deg, var(--primary-color), var(--accent-pink)) !important;
+    }
+    
+    .stProgress > div {
+        background: rgba(255, 255, 255, 0.1) !important;
+    }
+    
+    /* Tabs */
+    .stTabs [data-baseweb="tab-list"] {
+        background: rgba(30, 27, 75, 0.6);
+        border: 1px solid var(--glass-border);
+        border-radius: 12px;
+        padding: 8px;
+    }
+    
+    .stTabs [data-baseweb="tab"] {
+        color: var(--text-muted) !important;
+        font-weight: 600 !important;
+    }
+    
+    .stTabs [aria-selected="true"] {
+        background: linear-gradient(135deg, var(--primary-color), var(--secondary-color)) !important;
+        color: white !important;
+    }
+    
+    /* Sidebar */
+    section[data-testid="stSidebar"] {
+        background: rgba(15, 23, 42, 0.95) !important;
+        border-right: 1px solid var(--glass-border) !important;
+    }
+    
+    section[data-testid="stSidebar"] * {
+        color: var(--text-secondary) !important;
+    }
+    
+    section[data-testid="stSidebar"] h1,
+    section[data-testid="stSidebar"] h2,
+    section[data-testid="stSidebar"] h3 {
+        color: var(--text-primary) !important;
+    }
+    
+    /* Phase badges */
+    .phase-badge {
+        display: inline-block;
+        padding: 10px 20px;
+        border-radius: 25px;
+        font-weight: 600;
+        font-size: 14px;
+        margin: 8px 0;
+        text-align: center;
+    }
+    
+    .phase-active {
+        background: linear-gradient(135deg, var(--primary-color), var(--secondary-color));
+        color: white !important;
+        box-shadow: 0 4px 15px rgba(102, 126, 234, 0.5);
+    }
+    
+    .phase-complete {
+        background: linear-gradient(135deg, var(--success-color), #059669);
+        color: white !important;
+    }
+    
+    .phase-pending {
+        background: rgba(30, 27, 75, 0.6);
+        color: var(--text-muted) !important;
+        border: 1px solid var(--glass-border);
+    }
+    
+    /* Importance badges - COLOR CODED */
+    .importance-high {
+        background: linear-gradient(135deg, #ef4444, #dc2626) !important;
+        color: white !important;
+        padding: 6px 16px;
+        border-radius: 20px;
+        font-weight: 700;
+        display: inline-block;
+        box-shadow: 0 2px 8px rgba(239, 68, 68, 0.4);
+    }
+    
+    .importance-medium {
+        background: linear-gradient(135deg, #f59e0b, #d97706) !important;
+        color: white !important;
+        padding: 6px 16px;
+        border-radius: 20px;
+        font-weight: 700;
+        display: inline-block;
+        box-shadow: 0 2px 8px rgba(245, 158, 11, 0.4);
+    }
+    
+    .importance-low {
+        background: linear-gradient(135deg, #3b82f6, #2563eb) !important;
+        color: white !important;
+        padding: 6px 16px;
+        border-radius: 20px;
+        font-weight: 700;
+        display: inline-block;
+        box-shadow: 0 2px 8px rgba(59, 130, 246, 0.4);
+    }
+    
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
+    header {visibility: hidden;}
+    
+    .block-container {
+        padding-top: 2rem !important;
+        max-width: 1200px !important;
+    }
+</style>
+"""
 
-def get_cache_key(file_path: Union[str, Path], process_type: str) -> str:
-    if isinstance(file_path, Path):
-        file_path = str(file_path)
-    if os.path.isfile(file_path):
-        file_hash = str(hash(file_path + str(os.path.getmtime(file_path))))
+# ============================================================================
+# HELPER FUNCTIONS
+# ============================================================================
+
+def get_file_hash(content: bytes) -> str:
+    """Generate hash for file caching."""
+    return hashlib.md5(content).hexdigest()
+
+def validate_api_key(api_key: str) -> bool:
+    """Validate OpenAI API key format."""
+    if not api_key:
+        return False
+    return api_key.startswith('sk-') and len(api_key) > 20
+
+def calculate_reading_time(word_count: int) -> int:
+    """Calculate estimated reading time in minutes (250 words/min)."""
+    return max(1, word_count // 250)
+
+def get_recommended_modules(slide_count: int) -> int:
+    """Get recommended module count based on slide count."""
+    for (min_slides, max_slides), modules in MODULE_RECOMMENDATIONS.items():
+        if min_slides <= slide_count <= max_slides:
+            return modules
+    return 8
+
+def format_duration(minutes: int) -> str:
+    """Format duration in minutes to human-readable string."""
+    hours = minutes // 60
+    mins = minutes % 60
+    
+    if hours == 0:
+        return f"{mins}m"
+    elif mins == 0:
+        return f"{hours}h"
     else:
-        file_hash = str(hash(file_path))
-    return f"{file_hash}_{process_type}"
+        return f"{hours}h {mins}m"
 
-def get_from_cache(cache_key: str) -> Optional[Dict]:
-    cache_file = CACHE_DIR / f"{cache_key}.json"
-    if cache_file.exists():
-        try:
-            with open(cache_file, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except Exception as e:
-            logger.error(f"Error reading cache: {e}")
-    return None
+def clean_json_response(response_text: str) -> str:
+    """Clean JSON response from API."""
+    text = response_text.strip()
+    
+    if text.startswith("```json"):
+        text = text[7:]
+    elif text.startswith("```"):
+        text = text[3:]
+    
+    if text.endswith("```"):
+        text = text[:-3]
+    
+    return text.strip()
 
-def save_to_cache(cache_key: str, data: Dict) -> None:
-    cache_file = CACHE_DIR / f"{cache_key}.json"
+def safe_json_load(text: str) -> Dict:
+    """Safely load JSON from API response."""
+    text = text.strip()
+    text = text.removeprefix("```json").removeprefix("```").strip()
+    text = text.removesuffix("```").strip()
+    
+    if not text.startswith('{') and not text.startswith('['):
+        import re
+        json_match = re.search(r'(\{.*\}|\[.*\])', text, re.DOTALL)
+        if json_match:
+            text = json_match.group(1)
+    
+    return json.loads(text)
+
+def chunk_text(text: str, max_chars: int = 80000) -> List[str]:
+    """Split text into chunks safe for GPT context window."""
+    if len(text) <= max_chars:
+        return [text]
+    
+    chunks = []
+    for i in range(0, len(text), max_chars):
+        chunks.append(text[i:i + max_chars])
+    
+    logger.info(f"Chunked {len(text)} chars into {len(chunks)} chunks")
+    return chunks
+
+def validate_file_upload(uploaded_file) -> Tuple[bool, str]:
+    """Validate uploaded file."""
+    if uploaded_file is None:
+        return False, "No file uploaded"
+    
+    file_size_mb = uploaded_file.size / (1024 * 1024)
+    if file_size_mb > MAX_FILE_SIZE_MB:
+        return False, f"File size ({file_size_mb:.1f}MB) exceeds maximum ({MAX_FILE_SIZE_MB}MB)"
+    
+    file_extension = uploaded_file.name.split('.')[-1].lower()
+    if file_extension not in SUPPORTED_FORMATS:
+        return False, f"Unsupported format: {file_extension}"
+    
+    return True, "Valid file"
+
+def load_api_key_from_env() -> str:
+    """Load API key from Streamlit secrets.toml file."""
     try:
-        with open(cache_file, 'w', encoding='utf-8') as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        logger.error(f"Error saving to cache: {e}")
+        api_key = st.secrets["OPENAI_API_KEY"]
+        if api_key:
+            logger.info("API key loaded from secrets.toml")
+        return api_key
+    except (KeyError, FileNotFoundError):
+        logger.warning("API key not found in secrets.toml")
+        return ""
 
-def split_into_sentences(text: str) -> List[str]:
-    sentences = []
-    for paragraph in text.split('\n'):
-        if paragraph.strip():
-            if re.match(r'^[\s]*[•\-\*\d]+[\.\)]*\s', paragraph):
-                sentences.append(paragraph.strip())
-            else:
-                for s in re.split(r'(?<=[.!?])\s+', paragraph):
-                    if len(s.strip().split()) > 3:
-                        sentences.append(s.strip())
-    return sentences
-
-def calculate_training_duration(num_slides: int, pace: str = "medium", includes_activities: bool = True) -> Dict[str, float]:
-    """Calculate training duration based on slides and pace"""
-    minutes_per_slide = SLIDE_DURATION_MAP.get(pace, 5)
-    
-    # Base time for slides
-    presentation_time = num_slides * minutes_per_slide
-    
-    # Add time for activities (roughly 20% more time)
-    if includes_activities:
-        presentation_time *= 1.2
-    
-    # Add breaks (10 min per hour)
-    total_hours = presentation_time / 60
-    break_time = (total_hours // 1) * 10
-    
-    total_minutes = presentation_time + break_time
-    
-    return {
-        "total_minutes": total_minutes,
-        "total_hours": total_minutes / 60,
-        "days": total_minutes / (60 * 8),
-        "presentation_minutes": presentation_time,
-        "break_minutes": break_time
+def initialize_session_state():
+    """Initialize all session state variables."""
+    defaults = {
+        'api_key': load_api_key_from_env(),  # Auto-load from secrets.toml
+        'theme': 'dark',  # Default theme
+        'current_phase': PHASE_1,
+        'phase_completed': {
+            PHASE_1: False,
+            PHASE_2: False,
+            PHASE_3: False,
+            PHASE_4: False
+        },
+        'uploaded_file': None,
+        'processed_content': None,
+        'full_source_text': None,
+        'extracted_topics': None,
+        'generated_outline': None,
+        'edited_topics': None,
+        'edited_outline': None,
+        'generated_slides': None,
+        'final_documents': {},
+        'target_modules': 8,
+        'target_slides': 50,
+        'training_duration': '1 day',
+        'extended_mode': False,
+        'custom_slide_count': None,
+        'template': 'Corporate - Professional',
+        'include_assessments': False,
+        'include_activities': True,
+        'detailed_analytics': False,
+        'enhanced_trainer_guide': True,
+        'generation_progress': {},
+        'error_log': []
     }
-
-def format_duration_display(duration_info: Dict[str, float]) -> str:
-    """Format duration for display"""
-    hours = int(duration_info['total_hours'])
-    minutes = int(duration_info['total_minutes'] % 60)
-    days = duration_info['days']
     
-    if days >= 1:
-        return f"{days:.1f} days ({hours}h {minutes}m)"
-    elif hours >= 1:
-        return f"{hours}h {minutes}m"
+    for key, value in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
+
+def render_importance_badge(importance: str) -> str:
+    """Render color-coded importance badge."""
+    importance_lower = importance.lower()
+    if importance_lower == 'high':
+        return f'<span class="importance-high">🔴 HIGH</span>'
+    elif importance_lower == 'medium':
+        return f'<span class="importance-medium">🟡 MEDIUM</span>'
+    elif importance_lower == 'low':
+        return f'<span class="importance-low">🔵 LOW</span>'
     else:
-        return f"{minutes}m"
+        return f'<span class="importance-medium">🟡 MEDIUM</span>'
+
+# ============================================================================
+# DOCUMENT PROCESSOR CLASS (keeping same as before for brevity)
+# ============================================================================
 
 class DocumentProcessor:
-    """Handles extraction of text from various document formats"""
+    """Handles extraction and processing of various document formats."""
     
-    @staticmethod
-    def process_document(file_path: Union[str, Path]) -> str:
-        if isinstance(file_path, str):
-            file_path = Path(file_path)
-            
-        cache_key = get_cache_key(file_path, "text_extraction")
-        cached_content = get_from_cache(cache_key)
-        
-        if cached_content:
-            logger.info(f"Using cached extraction for {file_path.name}")
-            return cached_content["content"]
-        
-        logger.info(f"Processing document: {file_path.name}")
-        
-        ext = file_path.suffix.lower()
-        content = ""
-        
+    def __init__(self):
+        self.supported_formats = SUPPORTED_FORMATS
+        logger.info("DocumentProcessor initialized")
+    
+    def process_file(self, uploaded_file) -> Dict[str, Any]:
+        """Process uploaded file and extract content."""
         try:
-            if ext == ".pdf":
-                content = DocumentProcessor._process_pdf(file_path)
-            elif ext == ".docx":
-                content = DocumentProcessor._process_docx(file_path)
-            elif ext == ".pptx":
-                content = DocumentProcessor._process_pptx(file_path)
-            elif ext in [".txt", ".md"]:
-                with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
-                    content = f.read()
-            else:
-                raise ValueError(f"Unsupported file format: {ext}")
-                
-            content = re.sub(r'\s+', ' ', content).strip()
-            save_to_cache(cache_key, {"content": content, "timestamp": datetime.now().isoformat()})
+            file_extension = uploaded_file.name.split('.')[-1].lower()
+            logger.info(f"Processing {file_extension} file: {uploaded_file.name}")
             
-            return content
+            temp_path = TEMP_DIR / uploaded_file.name
+            with open(temp_path, 'wb') as f:
+                f.write(uploaded_file.getbuffer())
+            
+            if file_extension == 'pdf':
+                result = self._process_pdf(temp_path)
+            elif file_extension == 'docx':
+                result = self._process_docx(temp_path)
+            elif file_extension == 'pptx':
+                result = self._process_pptx(temp_path)
+            elif file_extension == 'txt':
+                result = self._process_txt(temp_path)
+            elif file_extension == 'md':
+                result = self._process_markdown(temp_path)
+            elif file_extension in ['csv', 'xlsx']:
+                result = self._process_spreadsheet(temp_path, file_extension)
+            else:
+                raise ValueError(f"Unsupported format: {file_extension}")
+            
+            result['format'] = file_extension
+            result['filename'] = uploaded_file.name
+            result['processed_at'] = datetime.now().isoformat()
+            result['word_count'] = len(result['text'].split())
+            result['bullets'] = self._extract_bullets(result['text'])
+            
+            if temp_path.exists():
+                temp_path.unlink()
+            
+            logger.info(f"Successfully processed {uploaded_file.name}: {result['word_count']} words")
+            return result
+            
         except Exception as e:
-            logger.error(f"Error processing document {file_path.name}: {e}")
+            logger.error(f"Error processing file: {str(e)}")
             raise
     
-    @staticmethod
-    def _process_pdf(file_path: Path) -> str:
+    def _process_pdf(self, file_path: Path) -> Dict[str, Any]:
+        """Extract content from PDF file."""
+        text_content = []
+        pages_data = []
+        
         try:
-            text = ""
             with pdfplumber.open(file_path) as pdf:
-                for page in pdf.pages:
+                for i, page in enumerate(pdf.pages, 1):
                     page_text = page.extract_text() or ""
-                    text += page_text + "\n\n"
-            
-            if len(text.strip()) < 100:
-                logger.info(f"PDF appears to be scanned, applying OCR: {file_path.name}")
-                try:
-                    images = convert_from_path(file_path)
-                    ocr_text = ""
-                    for img in images:
-                        ocr_text += pytesseract.image_to_string(img) + "\n\n"
-                    if len(ocr_text.strip()) > len(text.strip()):
-                        text = ocr_text
-                except Exception as ocr_error:
-                    logger.error(f"OCR processing failed: {ocr_error}")
-            
-            return text
+                    
+                    if not page_text.strip():
+                        try:
+                            images = convert_from_path(file_path, first_page=i, last_page=i)
+                            if images:
+                                page_text = pytesseract.image_to_string(images[0])
+                        except Exception as ocr_error:
+                            logger.warning(f"OCR failed for page {i}: {str(ocr_error)}")
+                    
+                    text_content.append(page_text)
+                    pages_data.append({
+                        'page_number': i,
+                        'text': page_text,
+                        'bullets': self._extract_bullets(page_text)
+                    })
+        
         except Exception as e:
-            logger.error(f"PDF processing error: {e}")
+            logger.error(f"PDF processing error: {str(e)}")
             raise
-    
-    @staticmethod
-    def _process_docx(file_path: Path) -> str:
-        try:
-            doc = docx.Document(file_path)
-            text = ""
-            for para in doc.paragraphs:
-                text += para.text + "\n"
-            for table in doc.tables:
-                for row in table.rows:
-                    row_text = []
-                    for cell in row.cells:
-                        row_text.append(cell.text)
-                    text += " | ".join(row_text) + "\n"
-                text += "\n"
-            return text
-        except Exception as e:
-            logger.error(f"DOCX processing error: {e}")
-            raise
-    
-    @staticmethod
-    def _process_pptx(file_path: Path) -> str:
-        try:
-            prs = Presentation(file_path)
-            text = ""
-            for slide_num, slide in enumerate(prs.slides, 1):
-                title = ""
-                for shape in slide.shapes:
-                    if hasattr(shape, "text"):
-                        title = shape.text
-                        break
-                text += f"Slide {slide_num}: {title}\n"
-                for shape in slide.shapes:
-                    if hasattr(shape, "text") and shape.text != title:
-                        text += shape.text + "\n"
-                try:
-                    if hasattr(slide, "notes_slide") and slide.notes_slide:
-                        if hasattr(slide.notes_slide, "notes_text_frame") and slide.notes_slide.notes_text_frame.text:
-                            text += "Notes: " + slide.notes_slide.notes_text_frame.text + "\n"
-                except Exception as note_error:
-                    logger.warning(f"Error extracting notes from slide {slide_num}: {note_error}")
-                text += "\n"
-            return text
-        except Exception as e:
-            logger.error(f"PPTX processing error: {e}")
-            raise
-
-class ContentAnalyzer:
-    """Analyzes document content with quality metrics"""
-    
-    def __init__(self, openai_api_key: str):
-        self.client = OpenAI(api_key=openai_api_key)
-        logger.info("ContentAnalyzer initialized with OpenAI API")
-    
-    def extract_topics(self, content: str) -> List[Dict]:
-        cache_key = get_cache_key(str(hash(content)), "topic_extraction")
-        cached_topics = get_from_cache(cache_key)
-        
-        if cached_topics:
-            logger.info("Using cached topic extraction")
-            return cached_topics["topics"]
-        
-        try:
-            topics = self._extract_topics_openai(content)
-            save_to_cache(cache_key, {"topics": topics, "timestamp": datetime.now().isoformat()})
-            return topics
-        except Exception as e:
-            logger.error(f"OpenAI topic extraction error: {e}")
-            return self._fallback_topic_extraction(content)
-    
-    @retry(wait=wait_exponential(multiplier=1, min=4, max=60), stop=stop_after_attempt(3))
-    def _extract_topics_openai(self, content: str) -> List[Dict]:
-        content_sample = self._smart_sample(content, 6000)
-        
-        prompt = PROMPTS["topic_extraction"].format(content=content_sample)
-        
-        response = self.client.chat.completions.create(
-            model="gpt-4o",
-            messages=[
-                {"role": "system", "content": "You are an expert at analyzing training documents and extracting specific, concrete topics with real information from the content."},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.2,
-            response_format={"type": "json_object"},
-            max_tokens=1500
-        )
-        
-        result = response.choices[0].message.content
-        topics_data = json.loads(result)
-        
-        if "topics" not in topics_data:
-            raise ValueError("Invalid response format from OpenAI")
-            
-        return topics_data["topics"]
-    
-    def _smart_sample(self, text: str, target_chars: int) -> str:
-        """Sample text more intelligently to preserve context"""
-        target_chars = target_chars * 2
-        
-        if len(text) <= target_chars:
-            return text
-            
-        sentences = split_into_sentences(text)
-        if not sentences:
-            return text[:target_chars]
-        
-        first_count = int(len(sentences) * 0.5)
-        last_count = int(len(sentences) * 0.3)
-        middle_count = len(sentences) - first_count - last_count
-        
-        selected = sentences[:first_count]
-        
-        if middle_count > 0:
-            stride = max(1, middle_count // 30)
-            for i in range(first_count, first_count + middle_count, stride):
-                if i < len(sentences):
-                    selected.append(sentences[i])
-        
-        selected.extend(sentences[-last_count:])
-        
-        result = " ".join(selected)
-        return result[:target_chars * 2] if len(result) > target_chars * 2 else result
-    
-    def _fallback_topic_extraction(self, content: str) -> List[Dict]:
-        sentences = split_into_sentences(content)
-        
-        if len(sentences) < 10:
-            words = content.lower().split()
-            common_words = set(['the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by', 'from', 'as', 'is', 'was', 'are', 'were'])
-            key_words = [w for w in words if w not in common_words and len(w) > 4][:20]
-            
-            return [{
-                "title": " ".join(key_words[:3]).title(),
-                "description": sentences[0] if sentences else "Main content topic",
-                "importance": "high",
-                "key_concepts": key_words[:5],
-                "estimated_duration_minutes": 30
-            }]
-        
-        try:
-            vectorizer = CountVectorizer(max_df=0.9, min_df=2, stop_words='english', max_features=5000)
-            word_counts = vectorizer.fit_transform(sentences)
-            
-            lda = LatentDirichletAllocation(n_components=min(5, len(sentences)//10), max_iter=10, random_state=42)
-            lda.fit(word_counts)
-            
-            feature_names = vectorizer.get_feature_names_out()
-            topics = []
-            
-            for i, topic in enumerate(lda.components_):
-                top_words_idx = topic.argsort()[:-8-1:-1]
-                top_words = [feature_names[idx] for idx in top_words_idx]
-                
-                topics.append({
-                    "title": " ".join(top_words[:2]).title(),
-                    "description": f"Covers: {', '.join(top_words[:5])}",
-                    "importance": "medium",
-                    "key_concepts": top_words[:5],
-                    "estimated_duration_minutes": 30
-                })
-                
-            return topics
-        except Exception as e:
-            logger.error(f"Fallback topic extraction failed: {e}")
-            return [{"title": "Document Content", "description": "Main topics from document", "importance": "high", "key_concepts": [], "estimated_duration_minutes": 30}]
-    
-    @retry(wait=wait_exponential(multiplier=1, min=4, max=60), stop=stop_after_attempt(3))
-    def detect_training_type(self, content: str) -> str:
-        """Auto-detect the type of training from content"""
-        content_sample = self._smart_sample(content, 2000)
-        
-        prompt = f"""
-        Analyze this training content and determine the most appropriate training type.
-        
-        CONTENT:
-        {content_sample}
-        
-        Choose from these types:
-        - Corporate Training: General business skills, professional development
-        - Technical Skills: IT, software, technical procedures
-        - Compliance & Safety: Regulations, safety protocols, legal requirements
-        - New Employee Onboarding: Company introduction, orientation
-        - Leadership Development: Management, leadership skills
-        - Sales Training: Sales techniques, customer acquisition
-        - Customer Service: Service excellence, customer interaction
-        - Soft Skills: Communication, teamwork, emotional intelligence
-        - Product Training: Specific product knowledge
-        
-        Return JSON:
-        {{
-            "training_type": "The most appropriate type",
-            "confidence": 0.85,
-            "reasoning": "Why this type was selected"
-        }}
-        """
-        
-        response = self.client.chat.completions.create(
-            model="gpt-4o",
-            messages=[
-                {"role": "system", "content": "You are a training classification expert."},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.2,
-            response_format={"type": "json_object"},
-            max_tokens=300
-        )
-        
-        result = response.choices[0].message.content
-        detection_result = json.loads(result)
-        return detection_result.get("training_type", "Corporate Training")
-    
-    @retry(wait=wait_exponential(multiplier=1, min=4, max=60), stop=stop_after_attempt(3))
-    def generate_outline(self, topics: List[Dict], content: str, duration: str = "1 day") -> Dict:
-        cache_key = get_cache_key(str(hash(str(topics) + content)), f"outline_{duration}")
-        cached_outline = get_from_cache(cache_key)
-        
-        if cached_outline:
-            logger.info("Using cached outline")
-            return cached_outline["outline"]
-        
-        topic_summary = "\n".join([
-            f"- {topic['title']}: {topic['description']}\n  Key concepts: {', '.join(topic.get('key_concepts', []))}"
-            for topic in topics
-        ])
-        
-        content_summary = self._smart_sample(content, 6000)
-        
-        prompt = PROMPTS["outline_generation"].format(
-            topics=topic_summary,
-            content=content_summary,
-            duration=duration
-        )
-        
-        response = self.client.chat.completions.create(
-            model="gpt-4o",
-            messages=[
-                {"role": "system", "content": "You are a professional training developer. Extract REAL, SPECIFIC information from the provided document to create detailed learning content. Do not write generic placeholders."},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.3,
-            response_format={"type": "json_object"},
-            max_tokens=2500
-        )
-        
-        result = response.choices[0].message.content
-        outline = json.loads(result)
-        save_to_cache(cache_key, {"outline": outline, "timestamp": datetime.now().isoformat()})
-        
-        return outline
-    
-    @retry(wait=wait_exponential(multiplier=1, min=4, max=60), stop=stop_after_attempt(3))
-    def analyze_quality(self, content: str, outline: Dict) -> Dict:
-        """Analyze content quality"""
-        prompt = PROMPTS["quality_analysis"].format(
-            content=self._smart_sample(content, 3000),
-            outline=json.dumps(outline, indent=2)[:2000]
-        )
-        
-        response = self.client.chat.completions.create(
-            model="gpt-4o",
-            messages=[
-                {"role": "system", "content": "You are a training quality analyst. Provide honest, constructive feedback."},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.3,
-            response_format={"type": "json_object"},
-            max_tokens=1000
-        )
-        
-        result = response.choices[0].message.content
-        return json.loads(result)
-
-class AssessmentGenerator:
-    """Generates assessments and quizzes"""
-    
-    def __init__(self, openai_api_key: str):
-        self.client = OpenAI(api_key=openai_api_key)
-    
-    @retry(wait=wait_exponential(multiplier=1, min=4, max=60), stop=stop_after_attempt(3))
-    async def generate_assessment(self, module: Dict, num_questions: int = 10) -> Dict:
-        """Generate assessment questions for a module"""
-        module_content = json.dumps({
-            "title": module.get("title"),
-            "key_points": module.get("key_points", []),
-            "topics": module.get("topics", [])
-        }, indent=2)
-        
-        objectives = "\n".join(module.get("objectives", []))
-        difficulty = module.get("difficulty", "intermediate")
-        
-        prompt = PROMPTS["assessment_generation"].format(
-            module_content=module_content,
-            objectives=objectives,
-            difficulty=difficulty,
-            num_questions=num_questions
-        )
-        
-        response = self.client.chat.completions.create(
-            model="gpt-4o",
-            messages=[
-                {"role": "system", "content": "You are an assessment design expert. Create fair, clear, and relevant questions that accurately assess learning."},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.4,
-            response_format={"type": "json_object"},
-            max_tokens=2000
-        )
-        
-        result = response.choices[0].message.content
-        return json.loads(result)
-    
-    @retry(wait=wait_exponential(multiplier=1, min=4, max=60), stop=stop_after_attempt(3))
-    async def generate_activities(self, module: Dict) -> Dict:
-        """Generate learning activities"""
-        duration = module.get("duration", "45 minutes")
-        duration_minutes = int(re.search(r'\d+', duration).group()) if re.search(r'\d+', duration) else 45
-        
-        prompt = PROMPTS["activity_generation"].format(
-            module_title=module.get("title"),
-            module_content=json.dumps(module, indent=2)[:1500],
-            duration=duration_minutes
-        )
-        
-        response = self.client.chat.completions.create(
-            model="gpt-4o",
-            messages=[
-                {"role": "system", "content": "You are a learning experience designer. Create engaging, practical activities that reinforce learning."},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.5,
-            response_format={"type": "json_object"},
-            max_tokens=1500
-        )
-        
-        result = response.choices[0].message.content
-        return json.loads(result)
-
-class DocumentGenerator:
-    """Generates training materials with brand customization"""
-    
-    def __init__(self, openai_api_key: str, brand_config: Optional[Dict] = None):
-        self.client = OpenAI(api_key=openai_api_key)
-        self.content_store = {}
-        self.brand_config = brand_config or {}
-        self.assessment_generator = AssessmentGenerator(openai_api_key)
-    
-    def set_source_content(self, content: str):
-        self.content_store["source"] = content
-        self.content_store["sentences"] = split_into_sentences(content)
-    
-    def set_brand_config(self, brand_config: Dict):
-        self.brand_config = brand_config
-    
-    def _get_relevant_context(self, topic: str, num_sentences: int = 30) -> str:
-        """Get MORE relevant context with better scoring"""
-        if "sentences" not in self.content_store:
-            return ""
-        
-        sentences = self.content_store["sentences"]
-        topic_lower = topic.lower()
-        topic_words = set(topic_lower.split())
-        
-        scored = []
-        for sent in sentences:
-            sent_lower = sent.lower()
-            
-            word_matches = sum(1 for word in topic_words if word in sent_lower)
-            length_bonus = 1 if len(sent.split()) > 15 else 0
-            has_numbers = 1 if any(char.isdigit() for char in sent) else 0
-            has_proper_nouns = 1 if any(word[0].isupper() for word in sent.split()[1:]) else 0
-            
-            score = (word_matches * 2) + length_bonus + has_numbers + has_proper_nouns
-            
-            if score > 0:
-                scored.append((score, sent))
-        
-        scored.sort(reverse=True)
-        
-        relevant = []
-        added_indices = set()
-        
-        for score, sent in scored[:num_sentences]:
-            idx = sentences.index(sent)
-            
-            if idx not in added_indices:
-                relevant.append(sent)
-                added_indices.add(idx)
-            
-            if idx + 1 < len(sentences) and (idx + 1) not in added_indices:
-                relevant.append(sentences[idx + 1])
-                added_indices.add(idx + 1)
-        
-        return " ".join(relevant[:num_sentences * 2])
-    
-    def _validate_slide_content(self, slide: Dict) -> bool:
-        """Check if slide has substantive, unique content"""
-        content = slide.get('content', [])
-        notes = slide.get('notes', '')
-        
-        generic_phrases = [
-            'key concept', 'important topic', 'discuss the', 'present information',
-            'cover the basics', 'introduce the', 'explain the importance', 'overview of'
-        ]
-        
-        content_text = " ".join(str(c) for c in content).lower()
-        
-        if any(phrase in content_text for phrase in generic_phrases):
-            logger.warning(f"Rejected generic slide: {slide.get('title')}")
-            return False
-        
-        if len(notes) < 100:
-            logger.warning(f"Rejected slide with short notes: {slide.get('title')}")
-            return False
-        
-        has_specificity = (
-            any(char.isdigit() for char in content_text) or
-            any(word[0].isupper() for word in content_text.split()[1:]) or
-            len(content_text) > 200
-        )
-        
-        if not has_specificity:
-            logger.warning(f"Rejected non-specific slide: {slide.get('title')}")
-            return False
-        
-        return True
-    
-    @retry(wait=wait_exponential(multiplier=1, min=4, max=60), stop=stop_after_attempt(3), 
-           retry=retry_if_exception_type((Exception,)))
-    async def generate_slides_batch(self, topic: str, module: Dict, num_slides: int, previous_context: str = "") -> List[Dict]:
-        try:
-            context = self._get_relevant_context(topic, num_sentences=50)
-            
-            if not context:
-                context = " ".join(module.get("key_points", [topic]))
-            
-            max_context_chars = 4000
-            if len(context) > max_context_chars:
-                context = context[:max_context_chars]
-            
-            if len(previous_context) > 2000:
-                previous_context = previous_context[:2000]
-            
-            difficulty = module.get("difficulty", "intermediate")
-            
-            prompt = PROMPTS["slide_generation"].format(
-                topic=topic,
-                num_slides=num_slides,
-                difficulty=difficulty,
-                context=context,
-                previous_context=previous_context
-            )
-            
-            logger.info(f"Generating {num_slides} slides for topic: {topic}")
-            logger.info(f"Prompt length: {len(prompt)} chars")
-            
-            response = self.client.chat.completions.create(
-                model="gpt-4o",
-                messages=[
-                    {"role": "system", "content": "You are creating training slide content. Write ACTUAL educational content with specific facts, procedures, and examples from the SOURCE CONTEXT - NOT generic instructions about what to present. Be concrete and specific. Extract real information. Return a JSON object with a 'slides' array."},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=0.3,
-                response_format={"type": "json_object"},
-                max_tokens=min(4000, 1000 * num_slides)
-            )
-            
-            result = response.choices[0].message.content
-            logger.info(f"Received response for {topic}")
-            
-            try:
-                slides_data = json.loads(result)
-            except json.JSONDecodeError as e:
-                logger.error(f"JSON decode error: {e}")
-                logger.error(f"Response content: {result[:500]}")
-                raise
-            
-            if isinstance(slides_data, list):
-                slides_list = slides_data
-            elif isinstance(slides_data, dict):
-                slides_list = slides_data.get("slides", [])
-                if not slides_list and "slide" in slides_data:
-                    slides_list = [slides_data]
-            else:
-                logger.error(f"Unexpected slides_data type: {type(slides_data)}")
-                slides_list = []
-            
-            validated_slides = []
-            for slide in slides_list:
-                if isinstance(slide, dict) and self._validate_slide_content(slide):
-                    validated_slides.append(slide)
-            
-            if not validated_slides:
-                logger.warning(f"No validated slides for {topic}, returning original")
-                return slides_list if slides_list else []
-            
-            return validated_slides
-            
-        except Exception as e:
-            logger.error(f"Error in generate_slides_batch for {topic}: {e}")
-            logger.error(f"Error type: {type(e).__name__}")
-            return []
-    
-    def _create_fallback_slide(self, topic: str, module: Dict = None) -> Dict:
-        content = []
-        notes = ""
-        
-        if module and "key_points" in module:
-            content = module["key_points"][:4]
-            notes = f"{topic}: " + " ".join(module["key_points"])
-        else:
-            context = self._get_relevant_context(topic, 10)
-            if context:
-                sentences = split_into_sentences(context)
-                content = sentences[:4]
-                notes = context
-            else:
-                content = [
-                    f"{topic} - Key Concept #1",
-                    f"{topic} - Key Concept #2",
-                    f"{topic} - Key Concept #3",
-                    f"{topic} - Key Concept #4"
-                ]
-                notes = f"Core information about {topic}"
         
         return {
-            "slide_type": "content",
-            "title": topic,
-            "content": content,
-            "notes": notes,
-            "estimated_time_minutes": 5
+            'text': '\n\n'.join(text_content),
+            'pages': pages_data,
+            'page_count': len(pages_data)
         }
     
-    async def generate_slides_for_module(self, module: Dict, max_slides: int = 8) -> List[Dict]:
-        """Generate slides for a module with better context tracking and rate limiting"""
-        slides = []
+    def _process_docx(self, file_path: Path) -> Dict[str, Any]:
+        """Extract content from Word document."""
+        doc = DocxDocument(file_path)
         
-        title_slide = {
-            "slide_type": "title",
-            "title": module["title"],
-            "content": module["objectives"],
-            "notes": f"Welcome to {module['title']}. " + " ".join(module.get('key_points', [])[:3]),
-            "estimated_time_minutes": 2
-        }
-        slides.append(title_slide)
+        paragraphs = []
+        pages_data = []
+        current_page_text = []
+        page_num = 1
         
-        covered_topics = set()
-        context_history = f"Module: {module['title']}\nObjectives: {', '.join(module['objectives'])}\n"
-        
-        topics_to_cover = module.get("topics", [module["title"]])
-        slides_per_topic = max(2, (max_slides - 1) // max(1, len(topics_to_cover)))
-        
-        for idx, topic in enumerate(topics_to_cover):
-            if topic in covered_topics:
-                continue
-            
-            if idx > 0:
-                await asyncio.sleep(2)
-                logger.info(f"Rate limit delay: waiting 2 seconds before next topic...")
-            
-            try:
-                logger.info(f"Processing topic {idx+1}/{len(topics_to_cover)}: {topic}")
+        for para in doc.paragraphs:
+            text = para.text.strip()
+            if text:
+                paragraphs.append(text)
+                current_page_text.append(text)
                 
-                topic_slides = await self.generate_slides_batch(
-                    topic, 
-                    module, 
-                    num_slides=slides_per_topic,
-                    previous_context=context_history
-                )
-                
-                if topic_slides:
-                    for slide in topic_slides:
-                        if len(slides) >= max_slides:
-                            break
-                        
-                        slides.append(slide)
-                        
-                        slide_summary = f"\nSlide: {slide.get('title', 'Untitled')}\nContent: {' '.join(slide.get('content', []))[:200]}\n"
-                        context_history += slide_summary
-                        covered_topics.add(topic)
-                else:
-                    logger.warning(f"No slides generated for topic: {topic}")
-                    if len(slides) < max_slides:
-                        fallback = self._create_fallback_slide(topic, module)
-                        slides.append(fallback)
-                        covered_topics.add(topic)
-                
-            except Exception as e:
-                logger.error(f"Error generating slides for {topic}: {e}")
-                if len(slides) < max_slides:
-                    fallback = self._create_fallback_slide(topic, module)
-                    slides.append(fallback)
-                    covered_topics.add(topic)
-        
-        logger.info(f"Module {module['title']}: Generated {len(slides)} slides")
-        return slides[:max_slides]
-    
-    async def generate_presentation(self, outline: Dict, max_slides_per_module: int = 12, include_assessments: bool = True) -> Tuple[List[Dict], Dict]:
-        all_slides = []
-        all_assessments = {}
-        
-        description = outline.get("description", "Comprehensive professional training")
-        title_slide = {
-            "slide_type": "title",
-            "title": outline.get("title", "Professional Training Program"),
-            "content": description,
-            "notes": f"Welcome to {outline.get('title')}. {description} This training is designed for {outline.get('target_audience', 'professionals')}.",
-            "estimated_time_minutes": 3
-        }
-        all_slides.append(title_slide)
-        
-        agenda_slide = {
-            "slide_type": "agenda",
-            "title": "Training Agenda",
-            "content": [f"{i+1}. {mod['title']} ({mod.get('duration', '45 min')})" for i, mod in enumerate(outline.get("modules", []))],
-            "notes": f"Today we'll cover {len(outline.get('modules', []))} key modules. {' '.join([m['title'] for m in outline.get('modules', [])[:2]])}",
-            "estimated_time_minutes": 2
-        }
-        all_slides.append(agenda_slide)
-        
-        objectives_slide = {
-            "slide_type": "objectives",
-            "title": "Learning Objectives",
-            "content": outline.get("objectives", ["Master key concepts"]),
-            "notes": f"By the end of this training, you will: {' '.join(outline.get('objectives', [])[:2])}",
-            "estimated_time_minutes": 3
-        }
-        all_slides.append(objectives_slide)
-        
-        modules = outline.get("modules", [])
-        total_modules = len(modules)
-        
-        content_slides_needed = max_slides_per_module * total_modules
-        adjusted_slides_per_module = max(8, content_slides_needed // total_modules)
-        
-        logger.info(f"Target: {content_slides_needed} content slides across {total_modules} modules")
-        logger.info(f"Adjusted to {adjusted_slides_per_module} slides per module")
-        
-        for module_idx, module in enumerate(modules):
-            try:
-                logger.info(f"Generating slides for module {module_idx + 1}/{total_modules}: {module.get('title')}")
-                
-                if module_idx > 0:
-                    delay = 3
-                    logger.info(f"Rate limit delay: waiting {delay} seconds before next module...")
-                    await asyncio.sleep(delay)
-                
-                module_slides = await self.generate_slides_for_module(module, adjusted_slides_per_module)
-                
-                if module_slides:
-                    all_slides.extend(module_slides)
-                    logger.info(f"Successfully generated {len(module_slides)} slides for module {module_idx + 1}")
-                else:
-                    logger.warning(f"No slides generated for module {module_idx + 1}, adding placeholder")
-                    all_slides.append({
-                        "slide_type": "title",
-                        "title": module.get("title", "Module"),
-                        "content": module.get("objectives", []),
-                        "notes": " ".join(module.get("key_points", [])),
-                        "estimated_time_minutes": 5
+                if len(' '.join(current_page_text).split()) > 500:
+                    page_text = '\n'.join(current_page_text)
+                    pages_data.append({
+                        'page_number': page_num,
+                        'text': page_text,
+                        'bullets': self._extract_bullets(page_text)
                     })
+                    current_page_text = []
+                    page_num += 1
+        
+        if current_page_text:
+            page_text = '\n'.join(current_page_text)
+            pages_data.append({
+                'page_number': page_num,
+                'text': page_text,
+                'bullets': self._extract_bullets(page_text)
+            })
+        
+        tables_text = []
+        for table in doc.tables:
+            for row in table.rows:
+                row_text = ' | '.join([cell.text for cell in row.cells])
+                tables_text.append(row_text)
+        
+        full_text = '\n\n'.join(paragraphs)
+        if tables_text:
+            full_text += '\n\nTABLES:\n' + '\n'.join(tables_text)
+        
+        return {
+            'text': full_text,
+            'pages': pages_data,
+            'page_count': len(pages_data)
+        }
+    
+    def _process_pptx(self, file_path: Path) -> Dict[str, Any]:
+        """Extract content from PowerPoint presentation."""
+        prs = PptxPresentation(file_path)
+        
+        slides_data = []
+        text_content = []
+        
+        for i, slide in enumerate(prs.slides, 1):
+            slide_text_parts = []
+            
+            for shape in slide.shapes:
+                if hasattr(shape, "text") and shape.text:
+                    slide_text_parts.append(shape.text)
                 
-                if include_assessments:
-                    try:
-                        await asyncio.sleep(2)
-                        assessment = await self.assessment_generator.generate_assessment(module, num_questions=5)
-                        all_assessments[module['title']] = assessment
-                        logger.info(f"Generated assessment for module {module_idx + 1}")
-                    except Exception as e:
-                        logger.error(f"Error generating assessment for {module['title']}: {e}")
-                
-            except Exception as e:
-                logger.error(f"Error processing module {module.get('title')}: {e}")
-                logger.error(f"Error details: {type(e).__name__}: {str(e)}")
-                all_slides.append({
-                    "slide_type": "title",
-                    "title": module.get("title", "Module"),
-                    "content": module.get("objectives", ["Module content"]),
-                    "notes": " ".join(module.get("key_points", ["Module information"])),
-                    "estimated_time_minutes": 5
+                if shape.has_table:
+                    table = shape.table
+                    for row in table.rows:
+                        row_text = ' | '.join([cell.text for cell in row.cells])
+                        slide_text_parts.append(row_text)
+            
+            slide_text = '\n'.join(slide_text_parts)
+            text_content.append(slide_text)
+            
+            slides_data.append({
+                'slide_number': i,
+                'text': slide_text,
+                'bullets': self._extract_bullets(slide_text)
+            })
+        
+        return {
+            'text': '\n\n'.join(text_content),
+            'pages': slides_data,
+            'page_count': len(slides_data)
+        }
+    
+    def _process_txt(self, file_path: Path) -> Dict[str, Any]:
+        """Extract content from text file."""
+        with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+            text = f.read()
+        
+        words = text.split()
+        pages_data = []
+        page_size = 1000
+        
+        for i in range(0, len(words), page_size):
+            page_text = ' '.join(words[i:i+page_size])
+            pages_data.append({
+                'page_number': len(pages_data) + 1,
+                'text': page_text,
+                'bullets': self._extract_bullets(page_text)
+            })
+        
+        return {
+            'text': text,
+            'pages': pages_data,
+            'page_count': len(pages_data)
+        }
+    
+    def _process_markdown(self, file_path: Path) -> Dict[str, Any]:
+        """Extract content from markdown file."""
+        with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+            text = f.read()
+        
+        sections = re.split(r'\n#+\s+', text)
+        pages_data = []
+        
+        for i, section in enumerate(sections, 1):
+            if section.strip():
+                pages_data.append({
+                    'page_number': i,
+                    'text': section,
+                    'bullets': self._extract_bullets(section)
                 })
         
-        module_titles = [m['title'] for m in outline.get('modules', [])]
-        closing_slide = {
-            "slide_type": "closing",
-            "title": "Summary & Next Steps",
-            "content": [
-                f"Mastered: {', '.join(module_titles[:2])}" if len(module_titles) >= 2 else "Key concepts reviewed",
-                "Apply this knowledge immediately in your role",
-                "Complete the final assessment" if include_assessments else "Review key materials",
-                "Questions and discussion"
-            ],
-            "notes": f"Today we covered {len(module_titles)} modules: {', '.join(module_titles)}. Remember to apply these concepts in your daily work.",
-            "estimated_time_minutes": 5
+        return {
+            'text': text,
+            'pages': pages_data,
+            'page_count': len(pages_data)
         }
-        all_slides.append(closing_slide)
-        
-        logger.info(f"Presentation complete: {len(all_slides)} total slides generated")
-        return all_slides, all_assessments
     
-    def _apply_brand_colors(self, prs: PptxPresentation):
-        """Apply brand colors to presentation if configured"""
-        if not self.brand_config or 'colors' not in self.brand_config:
-            return
-        pass
+    def _process_spreadsheet(self, file_path: Path, format: str) -> Dict[str, Any]:
+        """Extract content from CSV or Excel file."""
+        if format == 'csv':
+            df = pd.read_csv(file_path)
+        else:
+            df = pd.read_excel(file_path)
+        
+        text_parts = []
+        text_parts.append("HEADERS: " + ', '.join(df.columns.tolist()))
+        
+        for idx, row in df.iterrows():
+            row_text = ' | '.join([f"{col}: {val}" for col, val in row.items()])
+            text_parts.append(row_text)
+        
+        full_text = '\n'.join(text_parts)
+        
+        summary = f"\nSUMMARY:\nRows: {len(df)}\nColumns: {len(df.columns)}\n"
+        summary += f"Columns: {', '.join(df.columns.tolist())}"
+        
+        return {
+            'text': full_text + summary,
+            'pages': [{'page_number': 1, 'text': full_text, 'bullets': []}],
+            'page_count': 1,
+            'dataframe': df.to_dict('records')
+        }
     
-    def create_powerpoint(self, slides: List[Dict], output_path: Union[str, Path]) -> Path:
-        if isinstance(output_path, str):
-            output_path = Path(output_path)
+    def _extract_bullets(self, text: str) -> List[str]:
+        """Extract bullet points and key sentences from text."""
+        bullets = []
         
-        prs = PptxPresentation()
-        prs.slide_width = Inches(13.33)
-        prs.slide_height = Inches(7.5)
+        bullet_patterns = [
+            r'^\s*[\-\*\•]\s+(.+)$',
+            r'^\s*\d+[\.\)]\s+(.+)$',
+            r'^\s*[a-zA-Z][\.\)]\s+(.+)$'
+        ]
         
-        self._apply_brand_colors(prs)
+        for line in text.split('\n'):
+            for pattern in bullet_patterns:
+                match = re.match(pattern, line)
+                if match:
+                    bullets.append(match.group(1).strip())
+                    break
         
-        for slide_data in slides:
-            slide_type = slide_data.get("slide_type", "content")
+        if not bullets:
+            sentences = re.split(r'[.!?]+', text)
+            bullets = [s.strip() for s in sentences if len(s.split()) >= 5][:10]
+        
+        return bullets[:20]
+
+# ============================================================================
+# AI CLASSES (TopicAnalyzer, OutlineGenerator, SlideGenerator, DocumentBuilder)
+# Keeping these the same as before for brevity
+# ============================================================================
+
+class TopicAnalyzer:
+    """Analyzes document content and extracts main topics using AI."""
+    
+    def __init__(self, api_key: str):
+        self.client = OpenAI(api_key=api_key)
+        self.model = DEFAULT_MODEL
+        logger.info("TopicAnalyzer initialized")
+    
+    @retry(wait=wait_exponential(min=4, max=60), stop=stop_after_attempt(3))
+    def extract_topics(self, content: str, num_topics: int = 8) -> List[Dict[str, Any]]:
+        """Extract main topics from document content using AI."""
+        try:
+            logger.info(f"Extracting {num_topics} topics from content")
             
-            try:
-                if slide_type in ["title", "closing"]:
-                    slide = prs.slides.add_slide(prs.slide_layouts[0])
-                    title = slide.shapes.title
-                    subtitle = slide.placeholders[1]
-                    
-                    title.text = slide_data["title"]
-                    
-                    if isinstance(slide_data["content"], list):
-                        subtitle.text = "\n".join(str(item) for item in slide_data["content"])
-                    else:
-                        subtitle.text = str(slide_data["content"])
+            chunks = chunk_text(content, 100000)
+            summary = "\n\n".join([chunk[:5000] for chunk in chunks[:3]])
+            
+            logger.info(f"Using {len(summary)} chars of content for topic extraction")
+            
+            prompt = f"""Analyze this training document and extract {num_topics} distinct main topics.
+
+DOCUMENT:
+{summary}
+
+Return JSON with this EXACT structure:
+{{
+  "topics": [
+    {{
+      "id": 1,
+      "title": "Specific Topic Name",
+      "description": "What this topic covers (2-3 sentences)",
+      "key_concepts": ["concept1", "concept2", "concept3", "concept4", "concept5"],
+      "importance": "high",
+      "estimated_duration_minutes": 45
+    }}
+  ]
+}}
+
+Requirements:
+- Extract {num_topics} topics
+- Each topic must have 4-6 key concepts
+- Importance: high/medium/low
+- Duration: 20-90 minutes based on topic complexity
+- Topics should be distinct and cover different aspects
+- Return ONLY valid JSON, no additional text"""
+
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "You are an expert instructional designer analyzing training content. Return only valid JSON."
+                    },
+                    {
+                        "role": "user",
+                        "content": prompt
+                    }
+                ],
+                response_format={"type": "json_object"},
+                temperature=TEMPERATURE,
+                max_tokens=MAX_TOKENS
+            )
+            
+            response_text = response.choices[0].message.content
+            result = safe_json_load(response_text)
+            topics = result.get('topics', [])
+            
+            for i, topic in enumerate(topics, 1):
+                if 'id' not in topic:
+                    topic['id'] = i
+                if 'importance' not in topic or topic['importance'] not in ['high', 'medium', 'low']:
+                    topic['importance'] = 'medium'
+                if 'estimated_duration_minutes' not in topic:
+                    topic['estimated_duration_minutes'] = 45
+            
+            logger.info(f"Successfully extracted {len(topics)} topics")
+            return topics
+            
+        except json.JSONDecodeError as e:
+            logger.error(f"JSON parsing error: {str(e)}")
+            logger.error(f"Response text: {response_text}")
+            raise ValueError(f"Failed to parse API response as JSON: {str(e)}")
+        
+        except Exception as e:
+            logger.error(f"Topic extraction error: {str(e)}")
+            raise
+
+class OutlineGenerator:
+    """Generates structured training outline from topics."""
+    
+    def __init__(self, api_key: str):
+        self.client = OpenAI(api_key=api_key)
+        self.model = DEFAULT_MODEL
+        logger.info("OutlineGenerator initialized")
+    
+    @retry(wait=wait_exponential(multiplier=1, min=4, max=60), stop=stop_after_attempt(5))
+    def generate_outline(
+        self,
+        topics: List[Dict],
+        target_modules: int,
+        target_slides: int,
+        duration: str,
+        template: str = "Corporate - Professional"
+    ) -> Dict[str, Any]:
+        """Generate structured training outline."""
+        try:
+            logger.info(f"Generating outline: {target_modules} modules, {target_slides} slides")
+            
+            topics_summary = "\n".join([
+                f"{i}. {t['title']}\n   Concepts: {', '.join(t['key_concepts'][:4])}\n   Duration: {t['estimated_duration_minutes']}min"
+                for i, t in enumerate(topics, 1)
+            ])
+            
+            slides_per_module = target_slides // target_modules
+            
+            prompt = f"""Create a detailed training outline with {target_modules} modules and approximately {target_slides} total slides.
+
+TOPICS IDENTIFIED:
+{topics_summary}
+
+REQUIREMENTS:
+- Duration: {duration}
+- Modules: {target_modules}
+- Total Slides: ~{target_slides} (approximately {slides_per_module} per module)
+- Template Style: {template}
+
+Return JSON with this EXACT structure:
+{{
+  "title": "Comprehensive Training Program Title",
+  "description": "2-3 sentence program overview",
+  "duration": "{duration}",
+  "total_modules": {target_modules},
+  "estimated_slides": {target_slides},
+  "objectives": [
+    "Primary learning objective 1",
+    "Primary learning objective 2",
+    "Primary learning objective 3",
+    "Primary learning objective 4"
+  ],
+  "modules": [
+    {{
+      "id": 1,
+      "title": "Module Title",
+      "duration": "2 hours",
+      "objectives": [
+        "Module objective 1",
+        "Module objective 2",
+        "Module objective 3"
+      ],
+      "topics": ["topic1", "topic2", "topic3"],
+      "key_points": [
+        "Key point 1",
+        "Key point 2",
+        "Key point 3",
+        "Key point 4",
+        "Key point 5"
+      ],
+      "estimated_slides": {slides_per_module}
+    }}
+  ]
+}}
+
+Requirements:
+- Create exactly {target_modules} modules
+- Distribute {target_slides} slides evenly across modules
+- Each module should have 3-4 objectives
+- Each module should have 5-8 key points
+- Modules should build progressively
+- Return ONLY valid JSON"""
+
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "You are an expert instructional designer creating comprehensive training outlines. Return only valid JSON."
+                    },
+                    {
+                        "role": "user",
+                        "content": prompt
+                    }
+                ],
+                response_format={"type": "json_object"},
+                temperature=TEMPERATURE,
+                max_tokens=MAX_TOKENS
+            )
+            
+            response_text = response.choices[0].message.content
+            outline = safe_json_load(response_text)
+            
+            for i, module in enumerate(outline.get('modules', []), 1):
+                if 'id' not in module:
+                    module['id'] = i
+                if 'estimated_slides' not in module:
+                    module['estimated_slides'] = slides_per_module
+            
+            actual_total = sum(m['estimated_slides'] for m in outline['modules'])
+            if actual_total != target_slides:
+                diff = target_slides - actual_total
+                outline['modules'][0]['estimated_slides'] += diff
+            
+            outline['estimated_slides'] = target_slides
+            outline['total_modules'] = len(outline['modules'])
+            
+            logger.info(f"Successfully generated outline with {len(outline['modules'])} modules")
+            return outline
+            
+        except json.JSONDecodeError as e:
+            logger.error(f"JSON parsing error: {str(e)}")
+            logger.error(f"Response text: {response_text}")
+            raise ValueError(f"Failed to parse API response as JSON: {str(e)}")
+        
+        except Exception as e:
+            logger.error(f"Outline generation error: {str(e)}")
+            raise
+
+class SlideGenerator:
+    """Generates individual slides for each module using AI."""
+    
+    def __init__(self, api_key: str):
+        self.client = OpenAI(api_key=api_key)
+        self.model = DEFAULT_MODEL
+        self.full_content = ""
+        self.temperature = 0.2
+        logger.info("SlideGenerator initialized")
+    
+    def set_source_content(self, content: str):
+        """Set source document content for context."""
+        if not content or len(content.strip()) < 100:
+            logger.error("Source content is empty or too short!")
+            raise ValueError("Source document must contain at least 100 characters")
+        
+        self.full_content = content
+        logger.info(f"Source content set: {len(self.full_content)} chars")
+    
+    @retry(wait=wait_exponential(multiplier=1, min=4, max=60), stop=stop_after_attempt(5))
+    def generate_slides_for_module(
+        self,
+        module: Dict,
+        progress_callback=None
+    ) -> List[Dict]:
+        """Generate slides for a module."""
+        try:
+            target_slides = min(module.get('estimated_slides', 8), 100)
+            logger.info(f"Generating {target_slides} slides for module: {module.get('title')}")
+            
+            if progress_callback:
+                progress_callback(f"Generating {target_slides} slides...", 0)
+            
+            context_chunks = chunk_text(self.full_content, 60000)
+            base_context = "\n\n".join(context_chunks[:2])
+            
+            batch_size = 15
+            all_slides = []
+            
+            for batch_start in range(0, target_slides, batch_size):
+                batch_count = min(batch_size, target_slides - batch_start)
+                batch_num = (batch_start // batch_size) + 1
+                total_batches = (target_slides + batch_size - 1) // batch_size
                 
+                if progress_callback:
+                    progress = int((batch_start / target_slides) * 100)
+                    progress_callback(f"Batch {batch_num}/{total_batches}...", progress)
+                
+                previous_context = json.dumps(all_slides[-5:], default=str) if all_slides else "None"
+                
+                prompt = f"""Generate {batch_count} training slides for this module.
+
+MODULE: {module.get('title')}
+OBJECTIVES: {', '.join(module.get('objectives', [])[:3])}
+TOPICS: {', '.join(module.get('topics', [])[:3])}
+
+SOURCE CONTENT:
+{base_context[:10000]}
+
+PREVIOUS SLIDES:
+{previous_context}
+
+Return JSON array with {batch_count} slides:
+[
+  {{
+    "slide_number": {batch_start + 1},
+    "title": "Specific Topic Title",
+    "content": [
+      "Specific fact with data/numbers",
+      "Another distinct detail",
+      "Different concrete example",
+      "Unique application"
+    ],
+    "notes": "Detailed 200+ word teaching guide",
+    "slide_type": "content"
+  }}
+]
+
+CRITICAL: Extract REAL information from source content above."""
+
+                try:
+                    response = self.client.chat.completions.create(
+                        model=self.model,
+                        messages=[
+                            {
+                                "role": "system",
+                                "content": "Extract specific information from source documents. Return only valid JSON."
+                            },
+                            {
+                                "role": "user",
+                                "content": prompt
+                            }
+                        ],
+                        response_format={"type": "json_object"},
+                        temperature=0.1,
+                        max_tokens=4000
+                    )
+                    
+                    result = response.choices[0].message.content.strip()
+                    parsed = safe_json_load(result)
+                    
+                    if isinstance(parsed, dict):
+                        batch = parsed.get('slides', [])
+                    elif isinstance(parsed, list):
+                        batch = parsed
+                    else:
+                        continue
+                    
+                    for i, slide in enumerate(batch):
+                        slide['slide_number'] = batch_start + i + 1
+                    
+                    all_slides.extend(batch)
+                    
+                except Exception as batch_error:
+                    logger.warning(f"Batch {batch_num} failed: {str(batch_error)}")
+                    continue
+            
+            final_slides = all_slides[:target_slides]
+            
+            for i, slide in enumerate(final_slides):
+                if i == 0:
+                    slide['slide_type'] = 'title'
+                elif i == len(final_slides) - 1:
+                    slide['slide_type'] = 'summary'
+                else:
+                    slide['slide_type'] = 'content'
+            
+            if progress_callback:
+                progress_callback(f"Generated {len(final_slides)} slides", 100)
+            
+            return final_slides
+            
+        except Exception as e:
+            logger.error(f"Slide generation error: {str(e)}")
+            raise
+
+class DocumentBuilder:
+    """Creates final output documents with AI-powered assessments."""
+    
+    @staticmethod
+    def create_powerpoint(
+        outline: Dict,
+        slides: List[Dict],
+        output_path: Path,
+        template: str = "Corporate"
+    ) -> Path:
+        """Create PowerPoint presentation."""
+        try:
+            logger.info(f"Creating PowerPoint with {len(slides)} slides")
+            
+            prs = PptxPresentation()
+            prs.slide_width = Inches(10)
+            prs.slide_height = Inches(7.5)
+            
+            # Title slide
+            title_slide = prs.slides.add_slide(prs.slide_layouts[0])
+            title = title_slide.shapes.title
+            subtitle = title_slide.placeholders[1]
+            
+            title.text = outline.get('title', 'Training Program')
+            subtitle.text = f"{outline.get('duration', 'N/A')} | {len(slides)} Slides"
+            
+            # Add all slides
+            for slide_data in slides:
+                if slide_data.get('slide_type') == 'title':
+                    slide = prs.slides.add_slide(prs.slide_layouts[5])
+                    title = slide.shapes.title
+                    title.text = slide_data.get('title', '')
                 else:
                     slide = prs.slides.add_slide(prs.slide_layouts[1])
                     title = slide.shapes.title
                     content = slide.placeholders[1]
                     
-                    title.text = slide_data["title"]
+                    title.text = slide_data.get('title', '')
                     
                     text_frame = content.text_frame
                     text_frame.clear()
                     
-                    bullet_points = slide_data["content"] if isinstance(slide_data["content"], list) else [str(slide_data["content"])]
-                    
-                    for bullet in bullet_points:
+                    for bullet in slide_data.get('content', []):
                         p = text_frame.add_paragraph()
-                        p.text = str(bullet)
+                        p.text = bullet
                         p.level = 0
+                        p.space_before = Pt(6)
                 
-                if "notes" in slide_data:
-                    notes_slide = slide.notes_slide
-                    text_frame = notes_slide.notes_text_frame
-                    text_frame.text = slide_data["notes"]
-                    
-            except Exception as e:
-                logger.error(f"Error creating slide '{slide_data.get('title', 'Unknown')}': {e}")
-        
-        try:
-            prs.save(output_path)
-            logger.info(f"Successfully saved presentation to: {output_path}")
+                notes_slide = slide.notes_slide
+                notes_text_frame = notes_slide.notes_text_frame
+                notes_text_frame.text = slide_data.get('notes', '')
+            
+            prs.save(str(output_path))
+            logger.info(f"PowerPoint saved to {output_path}")
+            
             return output_path
+            
         except Exception as e:
-            logger.error(f"Error saving presentation: {e}")
+            logger.error(f"PowerPoint creation error: {str(e)}")
             raise
     
-    async def create_assessment_document(self, assessments: Dict, outline: Dict, output_path: Union[str, Path]) -> Path:
-        """Create a document with all assessments"""
-        if isinstance(output_path, str):
-            output_path = Path(output_path)
-        
-        doc = DocxDocument()
-        
-        doc.add_heading(f"Assessment: {outline.get('title', 'Training')}", 0)
-        
-        doc.add_paragraph(f"Training Program: {outline.get('title')}")
-        doc.add_paragraph(f"Duration: {outline.get('estimated_duration_hours', 8)} hours")
-        doc.add_paragraph("")
-        
-        for module_title, assessment in assessments.items():
-            doc.add_heading(f"Module: {module_title}", 1)
+    @staticmethod
+    def create_trainer_guide(
+        outline: Dict,
+        slides: List[Dict],
+        output_path: Path
+    ) -> Path:
+        """Create comprehensive trainer guide document."""
+        try:
+            logger.info("Creating trainer guide")
             
-            questions = assessment.get("questions", [])
+            doc = DocxDocument()
             
-            for idx, question in enumerate(questions, 1):
-                q_type = question.get("type", "multiple_choice")
+            # Title page
+            title = doc.add_heading(outline.get('title', 'Training Program'), 0)
+            title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            
+            subtitle = doc.add_paragraph('Trainer Guide')
+            subtitle.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            
+            doc.add_page_break()
+            
+            # Table of contents
+            doc.add_heading('Table of Contents', 1)
+            for i, module in enumerate(outline.get('modules', []), 1):
+                doc.add_paragraph(f"Module {i}: {module.get('title')}", style='List Number')
+            
+            doc.add_page_break()
+            
+            # Program overview
+            doc.add_heading('Program Overview', 1)
+            doc.add_paragraph(outline.get('description', ''))
+            
+            doc.add_heading('Duration', 2)
+            doc.add_paragraph(outline.get('duration', 'N/A'))
+            
+            doc.add_heading('Learning Objectives', 2)
+            for obj in outline.get('objectives', []):
+                doc.add_paragraph(obj, style='List Bullet')
+            
+            doc.add_page_break()
+            
+            # Module details
+            slide_index = 0
+            for module_num, module in enumerate(outline.get('modules', []), 1):
+                doc.add_heading(f"Module {module_num}: {module.get('title')}", 1)
                 
-                doc.add_heading(f"Question {idx} ({q_type.replace('_', ' ').title()})", 2)
+                doc.add_heading('Module Overview', 2)
+                doc.add_paragraph(f"Duration: {module.get('duration')}")
+                doc.add_paragraph(f"Estimated Slides: {module.get('estimated_slides')}")
                 
-                if q_type == "multiple_choice":
-                    doc.add_paragraph(question.get("question", ""))
-                    for opt in question.get("options", []):
-                        doc.add_paragraph(f"  {opt}", style='List Bullet')
-                    doc.add_paragraph(f"Correct Answer: {question.get('correct_answer')}")
-                    doc.add_paragraph(f"Explanation: {question.get('explanation')}")
+                doc.add_heading('Module Objectives', 2)
+                for obj in module.get('objectives', []):
+                    doc.add_paragraph(obj, style='List Bullet')
                 
-                elif q_type == "true_false":
-                    doc.add_paragraph(question.get("question", ""))
-                    doc.add_paragraph(f"Correct Answer: {question.get('correct_answer')}")
-                    doc.add_paragraph(f"Explanation: {question.get('explanation')}")
+                doc.add_heading('Key Points', 2)
+                for kp in module.get('key_points', []):
+                    doc.add_paragraph(kp, style='List Bullet')
                 
-                elif q_type == "scenario":
-                    doc.add_paragraph("Scenario:")
-                    doc.add_paragraph(question.get("scenario", ""))
-                    doc.add_paragraph(f"Question: {question.get('question')}")
-                    doc.add_paragraph("Suggested Answer:")
-                    doc.add_paragraph(question.get("suggested_answer", ""))
-                    doc.add_paragraph("Grading Rubric:")
-                    for criterion in question.get("rubric", []):
-                        doc.add_paragraph(f"• {criterion}")
+                doc.add_heading('Slide-by-Slide Guide', 2)
                 
+                module_slides = module.get('estimated_slides', 10)
+                for i in range(module_slides):
+                    if slide_index < len(slides):
+                        slide = slides[slide_index]
+                        
+                        doc.add_heading(f"Slide {slide_index + 1}: {slide.get('title')}", 3)
+                        
+                        doc.add_paragraph('Content:')
+                        for bullet in slide.get('content', []):
+                            doc.add_paragraph(bullet, style='List Bullet 2')
+                        
+                        doc.add_paragraph('Trainer Notes:')
+                        doc.add_paragraph(slide.get('notes', ''))
+                        
+                        slide_index += 1
+                
+                doc.add_page_break()
+            
+            doc.save(str(output_path))
+            logger.info(f"Trainer guide saved to {output_path}")
+            
+            return output_path
+            
+        except Exception as e:
+            logger.error(f"Trainer guide creation error: {str(e)}")
+            raise
+    
+    @staticmethod
+    @retry(wait=wait_exponential(multiplier=1, min=4, max=30), stop=stop_after_attempt(3))
+    def _generate_assessment_questions(
+        api_key: str,
+        module: Dict,
+        source_content: str
+    ) -> List[Dict]:
+        """AI-powered assessment question generation."""
+        try:
+            client = OpenAI(api_key=api_key)
+            
+            context_chunk = source_content[:5000] if source_content else ""
+            
+            prompt = f"""Generate assessment questions for this training module.
+
+MODULE: {module.get('title')}
+OBJECTIVES: {', '.join(module.get('objectives', [])[:3])}
+KEY POINTS: {', '.join(module.get('key_points', [])[:5])}
+
+SOURCE CONTENT:
+{context_chunk}
+
+Generate 4 questions in JSON format:
+{{
+  "questions": [
+    {{
+      "type": "multiple_choice",
+      "question": "Specific question based on content",
+      "options": ["A. Option 1", "B. Option 2", "C. Option 3", "D. Option 4"],
+      "correct_answer": "A",
+      "explanation": "Why this is correct"
+    }},
+    {{
+      "type": "multiple_choice",
+      "question": "Another specific question",
+      "options": ["A. ...", "B. ...", "C. ...", "D. ..."],
+      "correct_answer": "B",
+      "explanation": "Explanation"
+    }},
+    {{
+      "type": "multiple_choice",
+      "question": "Third question",
+      "options": ["A. ...", "B. ...", "C. ...", "D. ..."],
+      "correct_answer": "C",
+      "explanation": "Explanation"
+    }},
+    {{
+      "type": "short_answer",
+      "question": "Open-ended question about key concept",
+      "grading_points": ["Point 1", "Point 2", "Point 3"],
+      "sample_answer": "Example good answer"
+    }}
+  ]
+}}
+
+Requirements:
+- Use REAL content from source document
+- Include specific data, numbers, or facts
+- Make questions practical and relevant
+- Ensure correct answers are accurate
+- Return ONLY valid JSON"""
+
+            response = client.chat.completions.create(
+                model=DEFAULT_MODEL,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "You are an expert assessment designer. Create specific, relevant questions based on source content. Return only valid JSON."
+                    },
+                    {
+                        "role": "user",
+                        "content": prompt
+                    }
+                ],
+                response_format={"type": "json_object"},
+                temperature=0.3,
+                max_tokens=2000
+            )
+            
+            result = safe_json_load(response.choices[0].message.content)
+            questions = result.get('questions', [])
+            
+            logger.info(f"Generated {len(questions)} questions for module: {module.get('title')}")
+            return questions
+            
+        except Exception as e:
+            logger.warning(f"AI question generation failed: {str(e)}")
+            return DocumentBuilder._generate_fallback_questions(module)
+    
+    @staticmethod
+    def _generate_fallback_questions(module: Dict) -> List[Dict]:
+        """Fallback: Generate generic questions from module objectives."""
+        questions = []
+        
+        for i, objective in enumerate(module.get('objectives', [])[:3], 1):
+            questions.append({
+                'type': 'multiple_choice',
+                'question': f"Which statement best describes: {objective}?",
+                'options': [
+                    "A. First interpretation",
+                    "B. Second interpretation",
+                    "C. Third interpretation",
+                    "D. Fourth interpretation"
+                ],
+                'correct_answer': 'A',
+                'explanation': f"Based on module objective: {objective}"
+            })
+        
+        key_points = module.get('key_points', [])
+        if key_points:
+            questions.append({
+                'type': 'short_answer',
+                'question': f"Explain the key concepts covered in {module.get('title')}.",
+                'grading_points': key_points[:3],
+                'sample_answer': f"A good answer should cover: {', '.join(key_points[:3])}"
+            })
+        
+        return questions
+    
+    @staticmethod
+    def create_assessment(
+        outline: Dict,
+        output_path: Path,
+        api_key: str = None,
+        source_content: str = None
+    ) -> Path:
+        """Create AI-powered assessment document with real questions."""
+        try:
+            logger.info("Creating AI-powered assessment document")
+            
+            doc = DocxDocument()
+            
+            # Title
+            title = doc.add_heading(f"{outline.get('title')} - Assessment", 0)
+            title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            
+            doc.add_paragraph(f"Duration: {outline.get('duration')}")
+            doc.add_paragraph(f"Total Modules: {outline.get('total_modules')}")
+            doc.add_paragraph("")
+            
+            doc.add_heading("Instructions", 2)
+            doc.add_paragraph("Please answer all questions to the best of your ability.")
+            doc.add_paragraph("For multiple choice questions, select the best answer.")
+            doc.add_paragraph("For short answer questions, provide detailed responses.")
+            
+            doc.add_page_break()
+            
+            # Generate questions for each module
+            question_num = 1
+            
+            for module in outline.get('modules', []):
+                doc.add_heading(f"Module: {module.get('title')}", 1)
                 doc.add_paragraph("")
-        
-        doc.save(output_path)
-        logger.info(f"Successfully saved assessment document to: {output_path}")
-        return output_path
-    
-    @retry(wait=wait_exponential(multiplier=1, min=4, max=60), stop=stop_after_attempt(3))
-    async def generate_trainer_guide_section(self, module: Dict, slide: Dict) -> Dict:
-        prompt = PROMPTS["trainer_guide"].format(
-            module=json.dumps(module, indent=2),
-            slide=json.dumps(slide, indent=2)
-        )
-        
-        response = self.client.chat.completions.create(
-            model="gpt-4o",
-            messages=[
-                {"role": "system", "content": "You are creating a comprehensive trainer guide. Write the ACTUAL CONTENT the trainer should teach - specific facts, procedures, examples, and explanations with real information from the source. Do NOT write meta-instructions. Minimum 300 words of teaching content per section."},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.3,
-            response_format={"type": "json_object"},
-            max_tokens=2000
-        )
-        
-        result = response.choices[0].message.content
-        return json.loads(result)
-    
-    async def generate_trainer_guide(self, outline: Dict, slides: List[Dict], assessments: Dict, output_path: Union[str, Path]) -> Path:
-        if isinstance(output_path, str):
-            output_path = Path(output_path)
-        
-        doc = DocxDocument()
-        
-        doc.add_heading(f"Trainer Guide: {outline.get('title', 'Training Program')}", 0)
-        
-        total_slide_time = sum(slide.get("estimated_time_minutes", 5) for slide in slides)
-        duration_info = calculate_training_duration(len(slides), "medium", True)
-        
-        doc.add_heading("Training Overview", 1)
-        doc.add_paragraph(outline.get("description", "Comprehensive training program"))
-        doc.add_paragraph(f"Estimated Duration: {format_duration_display(duration_info)}")
-        doc.add_paragraph(f"Total Slides: {len(slides)}")
-        
-        doc.add_heading("Target Audience", 2)
-        doc.add_paragraph(outline.get("target_audience", "Professionals"))
-        
-        doc.add_heading("Prerequisites", 2)
-        doc.add_paragraph(outline.get("prerequisites", "Basic knowledge"))
-        
-        doc.add_heading("Learning Objectives", 2)
-        for objective in outline.get("objectives", []):
-            doc.add_paragraph(f"• {objective}")
-        
-        doc.add_heading("Training Agenda", 1)
-        for i, module in enumerate(outline.get("modules", []), 1):
-            doc.add_paragraph(f"{i}. {module.get('title')} - {module.get('duration', '45 min')}")
-        
-        current_module = None
-        
-        for slide in slides:
-            try:
-                if slide.get("slide_type") == "title" and slide.get("title") in [m.get("title") for m in outline.get("modules", [])]:
-                    for module in outline.get("modules", []):
-                        if module.get("title") == slide.get("title"):
-                            current_module = module
-                            
-                            doc.add_page_break()
-                            doc.add_heading(f"Module: {module.get('title')}", 1)
-                            
-                            doc.add_heading("Module Objectives", 2)
-                            for obj in module.get("objectives", []):
-                                doc.add_paragraph(f"• {obj}")
-                            
-                            doc.add_heading("Key Concepts", 2)
-                            for point in module.get("key_points", []):
-                                doc.add_paragraph(f"• {point}")
-                            
-                            if module.get('title') in assessments:
-                                doc.add_heading("Assessment", 2)
-                                doc.add_paragraph(f"This module includes {len(assessments[module.get('title')].get('questions', []))} assessment questions.")
-                            
-                            break
                 
-                if slide.get("slide_type") in ["title", "agenda", "objectives"] and slides.index(slide) < 3:
-                    continue
+                # Generate AI-powered questions
+                if api_key and source_content:
+                    try:
+                        questions = DocumentBuilder._generate_assessment_questions(
+                            api_key, module, source_content
+                        )
+                    except Exception:
+                        questions = DocumentBuilder._generate_fallback_questions(module)
+                else:
+                    questions = DocumentBuilder._generate_fallback_questions(module)
                 
-                if current_module:
-                    guide_section = await self.generate_trainer_guide_section(current_module, slide)
-                    
-                    doc.add_heading(f"Slide: {slide.get('title')}", 2)
-                    
-                    doc.add_heading("Teaching Content", 3)
-                    doc.add_paragraph(guide_section.get("teaching_content", "Detailed teaching content"))
-                    
-                    doc.add_heading("Delivery Approach", 3)
-                    doc.add_paragraph(guide_section.get("delivery_approach", "Teaching methods"))
-                    
-                    doc.add_heading("Examples from Source Material", 3)
-                    for example in guide_section.get("real_examples", []):
-                        doc.add_paragraph(f"• {example}")
-                    
-                    doc.add_heading("Key Points to Emphasize", 3)
-                    for point in guide_section.get("key_points_to_emphasize", []):
-                        doc.add_paragraph(f"• {point}")
-                    
-                    if "interactive_activity" in guide_section:
-                        activity = guide_section["interactive_activity"]
-                        doc.add_heading("Interactive Activity", 3)
-                        doc.add_paragraph(f"Type: {activity.get('activity_type', 'Discussion')}")
-                        doc.add_paragraph(f"Instructions: {activity.get('instructions', '')}")
-                        doc.add_paragraph(f"Duration: {activity.get('duration', '5 minutes')}")
-                        if activity.get('materials'):
-                            doc.add_paragraph("Materials needed:")
-                            for material in activity['materials']:
-                                doc.add_paragraph(f"  • {material}")
-                    
-                    doc.add_heading("Anticipated Questions & Answers", 3)
-                    for qa in guide_section.get("anticipated_questions", []):
-                        doc.add_paragraph(f"Q: {qa.get('question', '')}")
-                        doc.add_paragraph(f"A: {qa.get('detailed_answer', '')}")
+                # Add questions to document
+                for q in questions:
+                    if q['type'] == 'multiple_choice':
+                        doc.add_heading(f"Question {question_num}", 2)
+                        doc.add_paragraph(q['question'])
+                        doc.add_paragraph("")
+                        
+                        for option in q['options']:
+                            if option.startswith(q['correct_answer']):
+                                p = doc.add_paragraph(f"{option} ✓", style='List Bullet')
+                                for run in p.runs:
+                                    run.bold = True
+                            else:
+                                doc.add_paragraph(option, style='List Bullet')
+                        
+                        doc.add_paragraph("")
+                        doc.add_paragraph(f"Correct Answer: {q['correct_answer']}")
+                        doc.add_paragraph(f"Explanation: {q.get('explanation', '')}")
+                        doc.add_paragraph("")
+                        
+                    elif q['type'] == 'short_answer':
+                        doc.add_heading(f"Question {question_num}", 2)
+                        doc.add_paragraph(q['question'])
+                        doc.add_paragraph("")
+                        doc.add_paragraph("Answer:")
+                        doc.add_paragraph("_" * 80)
+                        doc.add_paragraph("_" * 80)
+                        doc.add_paragraph("_" * 80)
+                        doc.add_paragraph("")
+                        
+                        doc.add_paragraph("Grading Points:")
+                        for point in q.get('grading_points', []):
+                            doc.add_paragraph(f"• {point}", style='List Bullet 2')
+                        doc.add_paragraph("")
+                        
+                        doc.add_paragraph(f"Sample Answer: {q.get('sample_answer', '')}")
                         doc.add_paragraph("")
                     
-                    doc.add_heading("Assessment Checkpoint", 3)
-                    doc.add_paragraph(guide_section.get("assessment_checkpoint", "Quick knowledge check"))
-                    
-                    doc.add_heading("Timing & Transitions", 3)
-                    doc.add_paragraph(f"Time: {guide_section.get('timing_guidance', '5-10 minutes')}")
-                    doc.add_paragraph(f"Transitions: {guide_section.get('transitions', 'Smooth transition')}")
-                    
-                    doc.add_paragraph("-" * 50)
-                    
-            except Exception as e:
-                logger.error(f"Error in trainer guide section for slide '{slide.get('title')}': {e}")
-        
-        try:
-            doc.save(output_path)
-            logger.info(f"Successfully saved trainer guide to: {output_path}")
+                    question_num += 1
+                
+                doc.add_page_break()
+            
+            # Answer key summary
+            doc.add_heading("Answer Key Summary", 1)
+            doc.add_paragraph("Quick reference for all multiple choice answers:")
+            doc.add_paragraph("")
+            
+            q_num = 1
+            for module in outline.get('modules', []):
+                if api_key and source_content:
+                    try:
+                        questions = DocumentBuilder._generate_assessment_questions(
+                            api_key, module, source_content
+                        )
+                    except Exception:
+                        questions = DocumentBuilder._generate_fallback_questions(module)
+                else:
+                    questions = DocumentBuilder._generate_fallback_questions(module)
+                
+                for q in questions:
+                    if q['type'] == 'multiple_choice':
+                        doc.add_paragraph(f"Q{q_num}: {q['correct_answer']}")
+                        q_num += 1
+            
+            doc.save(str(output_path))
+            logger.info(f"AI-powered assessment saved to {output_path}")
+            
             return output_path
+            
         except Exception as e:
-            logger.error(f"Error saving trainer guide: {e}")
+            logger.error(f"Assessment creation error: {str(e)}")
+            raise
+    
+    @staticmethod
+    def create_zip_package(file_paths: List[Path], output_path: Path) -> Path:
+        """Create ZIP package of all documents."""
+        try:
+            with zipfile.ZipFile(output_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                for file_path in file_paths:
+                    if file_path.exists():
+                        zipf.write(file_path, file_path.name)
+            
+            logger.info(f"ZIP package created: {output_path}")
+            return output_path
+            
+        except Exception as e:
+            logger.error(f"ZIP creation error: {str(e)}")
             raise
 
-class EnhancedProgressTracker:
-    """Enhanced progress tracker with detailed step tracking"""
-    
-    def __init__(self):
-        self.status = "idle"
-        self.current_step = ""
-        self.total_steps = 0
-        self.completed_steps = 0
-        self.progress_percent = 0
-        self.message = ""
-        self.start_time = None
-        self.error = None
-        self.step_details = {}
-        self.substep_progress = 0
-        self.substep_total = 0
-    
-    def start(self, total_steps: int):
-        self.status = "running"
-        self.total_steps = total_steps
-        self.completed_steps = 0
-        self.progress_percent = 0
-        self.message = "Starting process..."
-        self.start_time = time.time()
-        self.error = None
-        self.step_details = {}
-    
-    def update_step(self, step_name: str, message: str = "", substep: int = 0, substep_total: int = 0):
-        """Update current step with optional substep progress"""
-        self.current_step = step_name
-        self.message = message or f"Processing {step_name}..."
-        self.substep_progress = substep
-        self.substep_total = substep_total
-        
-        if self.total_steps > 0:
-            step_progress = self.completed_steps / self.total_steps
-            
-            if substep_total > 0:
-                substep_contribution = (substep / substep_total) / self.total_steps
-                self.progress_percent = int((step_progress + substep_contribution) * 100)
-            else:
-                self.progress_percent = int(step_progress * 100)
-        
-        logger.info(f"Progress: {self.progress_percent}% - {self.message}")
-    
-    def complete_step(self, step_name: str):
-        """Mark a step as completed"""
-        self.completed_steps += 1
-        self.step_details[step_name] = "completed"
-        self.update_step(step_name, f"Completed {step_name}")
-    
-    def complete(self, message: str = "Process completed successfully"):
-        self.status = "complete"
-        self.progress_percent = 100
-        self.message = message
-        self.completed_steps = self.total_steps
-    
-    def fail(self, error: str):
-        self.status = "failed"
-        self.error = error
-        self.message = f"Error: {error}"
-    
-    def get_info(self) -> Dict:
-        elapsed = 0
-        if self.start_time:
-            elapsed = time.time() - self.start_time
-        
-        if self.progress_percent > 0 and self.progress_percent < 100:
-            estimated_total = elapsed / (self.progress_percent / 100)
-            remaining = estimated_total - elapsed
-        else:
-            remaining = 0
-        
-        return {
-            "status": self.status,
-            "current_step": self.current_step,
-            "completed_steps": self.completed_steps,
-            "total_steps": self.total_steps,
-            "progress_percent": self.progress_percent,
-            "message": self.message,
-            "elapsed_seconds": elapsed,
-            "remaining_seconds": remaining,
-            "error": self.error,
-            "substep_progress": self.substep_progress,
-            "substep_total": self.substep_total
-        }
+# ============================================================================
+# CONTENT EDITOR CLASS WITH IMPROVED IMPORTANCE DISPLAY
+# ============================================================================
 
-class TrainingGenerator:
-    def __init__(self, openai_api_key: str, brand_config: Optional[Dict] = None):
-        self.document_processor = DocumentProcessor()
-        self.content_analyzer = ContentAnalyzer(openai_api_key)
-        self.document_generator = DocumentGenerator(openai_api_key, brand_config)
-        self.progress_tracker = EnhancedProgressTracker()
+class ContentEditor:
+    """Provides interactive editing interfaces for topics and outlines."""
     
-    def set_brand_config(self, brand_config: Dict):
-        self.document_generator.set_brand_config(brand_config)
-    
-    async def process_document(self, file_path: Union[str, Path]) -> str:
-        self.progress_tracker.update_step("document_processing", "Processing document...")
-        content = self.document_processor.process_document(file_path)
-        self.document_generator.set_source_content(content)
-        return content
-    
-    async def analyze_content(self, content: str, duration: str = "1 day") -> Tuple[List[Dict], Dict]:
-        self.progress_tracker.update_step("topic_extraction", "Extracting topics...")
-        topics = self.content_analyzer.extract_topics(content)
+    @staticmethod
+    def render_topics_editor(topics: List[Dict]) -> List[Dict]:
+        """Render interactive UI for editing topics WITH COLOR-CODED IMPORTANCE."""
+        st.markdown("### 📋 Edit Extracted Topics")
+        st.markdown("Review and modify the topics extracted from your document.")
         
-        self.progress_tracker.update_step("outline_generation", "Generating outline...")
-        outline = self.content_analyzer.generate_outline(topics, content, duration)
+        edited_topics = []
         
-        return topics, outline
+        for idx, topic in enumerate(topics):
+            # Show importance badge in header
+            importance_badge = render_importance_badge(topic.get('importance', 'medium'))
+            
+            with st.expander(
+                f"**Topic {idx + 1}: {topic.get('title', 'Untitled')}**", 
+                expanded=(idx == 0)
+            ):
+                st.markdown(f"Current Importance: {importance_badge}", unsafe_allow_html=True)
+                st.markdown("---")
+                
+                col1, col2 = st.columns([3, 1])
+                
+                with col1:
+                    title = st.text_input(
+                        "Topic Title",
+                        value=topic.get('title', ''),
+                        key=f"topic_title_{idx}"
+                    )
+                
+                with col2:
+                    # Color-coded importance selector
+                    current_importance = topic.get('importance', 'medium')
+                    importance_options = {
+                        'high': '🔴 HIGH (Critical)',
+                        'medium': '🟡 MEDIUM (Important)',
+                        'low': '🔵 LOW (Optional)'
+                    }
+                    
+                    importance_display = st.selectbox(
+                        "Importance Level",
+                        options=list(importance_options.values()),
+                        index=list(importance_options.keys()).index(current_importance),
+                        key=f"topic_importance_{idx}"
+                    )
+                    
+                    # Extract actual importance value
+                    importance = list(importance_options.keys())[
+                        list(importance_options.values()).index(importance_display)
+                    ]
+                
+                description = st.text_area(
+                    "Description",
+                    value=topic.get('description', ''),
+                    key=f"topic_desc_{idx}",
+                    height=100
+                )
+                
+                col3, col4 = st.columns(2)
+                
+                with col3:
+                    key_concepts_str = ', '.join(topic.get('key_concepts', []))
+                    key_concepts = st.text_input(
+                        "Key Concepts (comma-separated)",
+                        value=key_concepts_str,
+                        key=f"topic_concepts_{idx}"
+                    )
+                
+                with col4:
+                    duration = st.number_input(
+                        "Duration (minutes)",
+                        min_value=10,
+                        max_value=180,
+                        value=int(topic.get('estimated_duration_minutes', 45)),
+                        step=5,
+                        key=f"topic_duration_{idx}"
+                    )
+                
+                edited_topics.append({
+                    'id': topic.get('id', idx + 1),
+                    'title': title,
+                    'description': description,
+                    'key_concepts': [k.strip() for k in key_concepts.split(',') if k.strip()],
+                    'importance': importance,
+                    'estimated_duration_minutes': duration
+                })
+        
+        st.markdown("---")
+        
+        if st.button("➕ Add New Topic", use_container_width=True):
+            new_topic = {
+                'id': len(edited_topics) + 1,
+                'title': f"New Topic {len(edited_topics) + 1}",
+                'description': "Enter topic description",
+                'key_concepts': ["concept1", "concept2", "concept3"],
+                'importance': 'medium',
+                'estimated_duration_minutes': 45
+            }
+            edited_topics.append(new_topic)
+            st.rerun()
+        
+        return edited_topics
     
-    async def analyze_quality(self, content: str, outline: Dict) -> Dict:
-        self.progress_tracker.update_step("quality_analysis", "Analyzing content quality...")
-        return self.content_analyzer.analyze_quality(content, outline)
-    
-    async def generate_materials(self, outline: Dict, output_dir: Union[str, Path], 
-                                 max_slides_per_module: int, include_assessments: bool = True) -> Dict:
-        if isinstance(output_dir, str):
-            output_dir = Path(output_dir)
+    @staticmethod
+    def render_outline_editor(outline: Dict) -> Dict:
+        """Render interactive UI for editing training outline."""
+        st.markdown("### 📝 Edit Training Outline")
+        st.markdown("Customize your training program structure and modules.")
         
-        output_dir.mkdir(exist_ok=True, parents=True)
+        st.markdown("#### Global Settings")
         
-        self.progress_tracker.update_step("slide_generation", "Generating slides...")
-        slides, assessments = await self.document_generator.generate_presentation(
-            outline, max_slides_per_module, include_assessments
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            title = st.text_input(
+                "Training Program Title",
+                value=outline.get('title', ''),
+                key="outline_title"
+            )
+        
+        with col2:
+            duration = st.selectbox(
+                "Training Duration",
+                options=list(DURATION_TO_SLIDES.keys()),
+                index=list(DURATION_TO_SLIDES.keys()).index(outline.get('duration', '1 day')) 
+                    if outline.get('duration') in DURATION_TO_SLIDES else 4,
+                key="outline_duration"
+            )
+        
+        description = st.text_area(
+            "Program Description",
+            value=outline.get('description', ''),
+            key="outline_description",
+            height=100
         )
         
-        duration_info = calculate_training_duration(len(slides), "medium", include_assessments)
+        objectives_text = '\n'.join(outline.get('objectives', []))
+        objectives = st.text_area(
+            "Learning Objectives (one per line)",
+            value=objectives_text,
+            key="outline_objectives",
+            height=120
+        )
+        objectives_list = [obj.strip() for obj in objectives.split('\n') if obj.strip()]
         
-        self.progress_tracker.update_step("presentation_creation", "Creating PowerPoint...")
-        safe_title = outline.get('title', 'Training').replace(' ', '_').replace('/', '_')
-        pptx_path = output_dir / f"{safe_title}.pptx"
-        pptx_path = self.document_generator.create_powerpoint(slides, pptx_path)
+        st.markdown("---")
+        st.markdown("#### Training Modules")
         
-        self.progress_tracker.update_step("trainer_guide_creation", "Creating trainer guide...")
-        guide_path = output_dir / f"{safe_title}_TrainerGuide.docx"
-        guide_path = await self.document_generator.generate_trainer_guide(outline, slides, assessments, guide_path)
+        edited_modules = []
         
-        assessment_path = None
-        if include_assessments and assessments:
-            self.progress_tracker.update_step("assessment_creation", "Creating assessment document...")
-            assessment_path = output_dir / f"{safe_title}_Assessment.docx"
-            assessment_path = await self.document_generator.create_assessment_document(assessments, outline, assessment_path)
+        for idx, module in enumerate(outline.get('modules', [])):
+            with st.expander(
+                f"**Module {idx + 1}: {module.get('title', 'Untitled')}** "
+                f"({module.get('estimated_slides', 0)} slides)",
+                expanded=(idx == 0)
+            ):
+                col1, col2, col3 = st.columns([2, 1, 1])
+                
+                with col1:
+                    module_title = st.text_input(
+                        "Module Title",
+                        value=module.get('title', ''),
+                        key=f"module_title_{idx}"
+                    )
+                
+                with col2:
+                    module_duration = st.text_input(
+                        "Duration",
+                        value=module.get('duration', ''),
+                        key=f"module_duration_{idx}"
+                    )
+                
+                with col3:
+                    estimated_slides = st.number_input(
+                        "Slides",
+                        min_value=1,
+                        max_value=100,
+                        value=min(int(module.get('estimated_slides', 10)), 100),
+                        key=f"module_slides_{idx}",
+                        help="Use +/- buttons to adjust"
+                    )
+                
+                module_objectives_text = '\n'.join(module.get('objectives', []))
+                module_objectives = st.text_area(
+                    "Module Objectives (one per line)",
+                    value=module_objectives_text,
+                    key=f"module_objectives_{idx}",
+                    height=100
+                )
+                module_objectives_list = [obj.strip() for obj in module_objectives.split('\n') if obj.strip()]
+                
+                topics_covered_str = ', '.join(module.get('topics', []))
+                topics_covered = st.text_input(
+                    "Topics Covered (comma-separated)",
+                    value=topics_covered_str,
+                    key=f"module_topics_{idx}"
+                )
+                topics_covered_list = [t.strip() for t in topics_covered.split(',') if t.strip()]
+                
+                key_points_text = '\n'.join(module.get('key_points', []))
+                key_points = st.text_area(
+                    "Key Points (one per line)",
+                    value=key_points_text,
+                    key=f"module_keypoints_{idx}",
+                    height=120
+                )
+                key_points_list = [kp.strip() for kp in key_points.split('\n') if kp.strip()]
+                
+                edited_modules.append({
+                    'id': module.get('id', idx + 1),
+                    'title': module_title,
+                    'duration': module_duration,
+                    'objectives': module_objectives_list,
+                    'topics': topics_covered_list,
+                    'key_points': key_points_list,
+                    'estimated_slides': estimated_slides
+                })
         
-        if not pptx_path.exists() or not guide_path.exists():
-            raise FileNotFoundError("Output files were not created")
+        st.markdown("---")
         
-        return {
-            "pptx_path": str(pptx_path),
-            "guide_path": str(guide_path),
-            "assessment_path": str(assessment_path) if assessment_path else None,
-            "duration_info": duration_info,
-            "total_slides": len(slides)
+        col1, col2, col3 = st.columns([1, 2, 1])
+        with col2:
+            if st.button("➕ Add New Module", use_container_width=True):
+                new_module = {
+                    'id': len(edited_modules) + 1,
+                    'title': f"New Module {len(edited_modules) + 1}",
+                    'duration': "2 hours",
+                    'objectives': ["Objective 1", "Objective 2"],
+                    'topics': ["Topic 1", "Topic 2"],
+                    'key_points': ["Key point 1", "Key point 2"],
+                    'estimated_slides': 10
+                }
+                edited_modules.append(new_module)
+                st.rerun()
+        
+        edited_outline = {
+            'title': title,
+            'description': description,
+            'duration': duration,
+            'objectives': objectives_list,
+            'modules': edited_modules,
+            'total_modules': len(edited_modules),
+            'estimated_slides': sum(m['estimated_slides'] for m in edited_modules)
         }
-    
-    async def generate_training_materials(self, file_path: Union[str, Path], output_dir: Union[str, Path], 
-                                         max_slides_per_module: int, include_assessments: bool = True,
-                                         duration: str = "1 day") -> Dict:
-        try:
-            total_steps = 7 if include_assessments else 6
-            self.progress_tracker.start(total_steps)
-            
-            self.progress_tracker.update_step("document_processing", "Processing document...")
-            content = await self.process_document(file_path)
-            self.progress_tracker.complete_step("document_processing")
-            
-            if not content or len(content.strip()) < 100:
-                raise ValueError("Insufficient content extracted from document")
-            
-            self.progress_tracker.update_step("topic_extraction", "Analyzing content and extracting topics...")
-            topics, outline = await self.analyze_content(content, duration)
-            self.progress_tracker.complete_step("topic_extraction")
-            
-            self.progress_tracker.update_step("quality_analysis", "Analyzing content quality...")
-            quality_analysis = await self.analyze_quality(content, outline)
-            self.progress_tracker.complete_step("quality_analysis")
-            
-            self.progress_tracker.update_step("material_generation", "Generating training materials...")
-            result = await self.generate_materials(outline, output_dir, max_slides_per_module, include_assessments)
-            self.progress_tracker.complete_step("material_generation")
-            
-            result["topics"] = topics
-            result["outline"] = outline
-            result["quality_analysis"] = quality_analysis
-            
-            self.progress_tracker.complete("Training materials generated successfully")
-            
-            return result
-            
-        except Exception as e:
-            logger.error(f"Error generating training materials: {e}")
-            self.progress_tracker.fail(str(e))
-            raise
-
-def load_custom_css():
-    if not OPENAI_API_KEY:
-        st.error("⚠️ API Key Not Configured")
-        st.markdown("""
-        ### How to fix this:
         
-        **For Streamlit Cloud:**
-        1. Go to your app settings → **Secrets**
-        2. Add the following:
-        ```toml
-        OPENAI_API_KEY = "sk-proj-your-api-key-here"
-        ```
-        3. Click **Save** and wait for the app to redeploy
-        
-        **For local development:**
-        - Set environment variable: `export OPENAI_API_KEY="your-key"`
-        """)
-        st.stop()
-    
-    st.markdown("""
-    <style>
-    :root {
-        --primary-color: #4F46E5;
-        --secondary-color: #10B981;
-        --background-color: #F9FAFB;
-        --card-background: #FFFFFF;
-        --text-color: #1F2937;
-        --border-color: #E5E7EB;
-    }
-    
-    .main {
-        background-color: var(--background-color);
-    }
-    
-    .custom-card {
-        background-color: var(--card-background);
-        padding: 2rem;
-        border-radius: 1rem;
-        box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1);
-        margin-bottom: 1.5rem;
-        border: 1px solid var(--border-color);
-    }
-    
-    .upload-area {
-        border: 2px dashed var(--border-color);
-        border-radius: 0.5rem;
-        padding: 2rem;
-        text-align: center;
-        background-color: var(--background-color);
-        transition: all 0.3s ease;
-    }
-    
-    .upload-area:hover {
-        border-color: var(--primary-color);
-        background-color: #EEF2FF;
-    }
-    
-    .stButton>button {
-        background-color: var(--primary-color);
-        color: white;
-        border: none;
-        padding: 0.75rem 2rem;
-        border-radius: 0.5rem;
-        font-weight: 500;
-        transition: all 0.3s ease;
-    }
-    
-    .stButton>button:hover {
-        background-color: #4338CA;
-        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
-    }
-    
-    .topic-card {
-        background: white;
-        border: 1px solid var(--border-color);
-        border-radius: 0.5rem;
-        padding: 1rem;
-        margin-bottom: 1rem;
-        transition: all 0.2s ease;
-    }
-    
-    .topic-card:hover {
-        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
-        border-color: var(--primary-color);
-    }
-    
-    .topic-badge {
-        display: inline-block;
-        padding: 0.25rem 0.75rem;
-        border-radius: 9999px;
-        font-size: 0.75rem;
-        font-weight: 500;
-        margin-left: 0.5rem;
-    }
-    
-    .badge-high {
-        background-color: #FEE2E2;
-        color: #991B1B;
-    }
-    
-    .badge-medium {
-        background-color: #FEF3C7;
-        color: #92400E;
-    }
-    
-    .badge-low {
-        background-color: #DBEAFE;
-        color: #1E40AF;
-    }
-    
-    .module-editor {
-        background: white;
-        border: 1px solid var(--border-color);
-        border-radius: 0.5rem;
-        padding: 1.5rem;
-        margin-bottom: 1rem;
-    }
-    
-    .module-header {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        margin-bottom: 1rem;
-        padding-bottom: 1rem;
-        border-bottom: 1px solid var(--border-color);
-    }
-    
-    .stProgress > div > div {
-        background-color: var(--primary-color);
-    }
-    
-    .info-box {
-        padding: 1rem;
-        border-radius: 0.5rem;
-        margin-bottom: 1rem;
-        border-left: 4px solid;
-    }
-    
-    .info-box.success {
-        background-color: #D1FAE5;
-        border-color: var(--secondary-color);
-        color: #065F46;
-    }
-    
-    .info-box.info {
-        background-color: #DBEAFE;
-        border-color: #3B82F6;
-        color: #1E40AF;
-    }
-    
-    .info-box.warning {
-        background-color: #FEF3C7;
-        border-color: #F59E0B;
-        color: #92400E;
-    }
-    
-    .metric-card {
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        color: white;
-        padding: 1.5rem;
-        border-radius: 0.5rem;
-        text-align: center;
-        margin-bottom: 1rem;
-    }
-    
-    .metric-value {
-        font-size: 2rem;
-        font-weight: 700;
-        margin: 0.5rem 0;
-    }
-    
-    .metric-label {
-        font-size: 0.875rem;
-        opacity: 0.9;
-    }
-    
-    #MainMenu {visibility: hidden;}
-    footer {visibility: hidden;}
-    
-    h1 {
-        color: var(--text-color);
-        font-weight: 700;
-    }
-    
-    h2 {
-        color: var(--text-color);
-        font-weight: 600;
-        margin-top: 1.5rem;
-    }
-    
-    h3 {
-        color: var(--text-color);
-        font-weight: 500;
-    }
-    
-    /* Sidebar specific styles */
-    [data-testid="stSidebar"] {
-        background-color: #F8F9FA;
-    }
-    
-    [data-testid="stSidebar"] .element-container {
-        color: #1F2937;
-    }
-    
-    .sidebar-section-header {
-        color: #1F2937;
-        font-size: 1.25rem;
-        font-weight: 700;
-        margin: 1.5rem 0 1rem 0;
-        display: flex;
-        align-items: center;
-        gap: 0.5rem;
-        padding: 0.75rem;
-        background: white;
-        border-radius: 0.5rem;
-        border-left: 4px solid #667eea;
-    }
-    
-    .config-field-label {
-        color: #374151;
-        font-size: 0.875rem;
-        font-weight: 600;
-        margin-bottom: 0.5rem;
-        margin-top: 0.75rem;
-    }
-    
-    .enhancement-header {
-        color: #1F2937;
-        font-size: 1.25rem;
-        font-weight: 700;
-        margin: 1.5rem 0 1rem 0;
-        display: flex;
-        align-items: center;
-        gap: 0.5rem;
-        padding: 0.75rem;
-        background: white;
-        border-radius: 0.5rem;
-        border-left: 4px solid #F59E0B;
-    }
-    
-    .sidebar-divider {
-        border-top: 2px solid #E5E7EB;
-        margin: 1.5rem 0;
-    }
-    
-    .custom-input-label {
-        color: #374151;
-        font-size: 0.875rem;
-        font-weight: 600;
-        margin-bottom: 0.5rem;
-    }
-    
-    .input-helper-text {
-        color: #6B7280;
-        font-size: 0.75rem;
-        margin-top: 0.25rem;
-    }
-    
-    [data-testid="stSidebar"] label {
-        color: #1F2937 !important;
-        font-weight: 500;
-    }
-    
-    [data-testid="stSidebar"] .stSelectbox label {
-        color: #374151 !important;
-        font-weight: 600;
-    }
-    </style>
-    """, unsafe_allow_html=True)
+        return edited_outline
 
-def render_step_indicator(current_step: str):
-    steps = {
-        "upload": {"number": 1, "title": "Upload Documents"},
-        "topics": {"number": 2, "title": "Review Topics"},
-        "edit": {"number": 3, "title": "Edit Outline"},
-        "generate": {"number": 4, "title": "Generate Materials"}
-    }
-    
-    step_order = ["upload", "topics", "edit", "generate"]
-    current_index = step_order.index(current_step)
-    
-    cols = st.columns(4)
-    
-    for i, (col, step_key) in enumerate(zip(cols, step_order)):
-        step = steps[step_key]
-        with col:
-            if i < current_index:
-                st.markdown(f"""
-                <div style="text-align: center; padding: 1rem;">
-                    <div style="width: 40px; height: 40px; border-radius: 50%; background-color: #10B981; color: white; 
-                                display: inline-flex; align-items: center; justify-content: center; font-weight: 600; 
-                                margin: 0 auto 0.5rem;">
-                        {step["number"]}
-                    </div>
-                    <div style="font-size: 0.75rem; color: #1F2937; font-weight: 500;">
-                        {step["title"]}
-                    </div>
-                </div>
-                """, unsafe_allow_html=True)
-            elif i == current_index:
-                st.markdown(f"""
-                <div style="text-align: center; padding: 1rem;">
-                    <div style="width: 40px; height: 40px; border-radius: 50%; background-color: #4F46E5; color: white; 
-                                display: inline-flex; align-items: center; justify-content: center; font-weight: 600; 
-                                margin: 0 auto 0.5rem; box-shadow: 0 0 0 4px rgba(79, 70, 229, 0.2);">
-                        {step["number"]}
-                    </div>
-                    <div style="font-size: 0.75rem; color: #4F46E5; font-weight: 600;">
-                        {step["title"]}
-                    </div>
-                </div>
-                """, unsafe_allow_html=True)
-            else:
-                st.markdown(f"""
-                <div style="text-align: center; padding: 1rem;">
-                    <div style="width: 40px; height: 40px; border-radius: 50%; background-color: #E5E7EB; color: #6B7280; 
-                                display: inline-flex; align-items: center; justify-content: center; font-weight: 600; 
-                                margin: 0 auto 0.5rem;">
-                        {step["number"]}
-                    </div>
-                    <div style="font-size: 0.75rem; color: #6B7280; font-weight: 500;">
-                        {step["title"]}
-                    </div>
-                </div>
-                """, unsafe_allow_html=True)
+# ============================================================================
+# PAGE SETUP WITH THEME TOGGLE
+# ============================================================================
 
-def render_file_card(filename: str, filesize: str, index: int):
-    st.markdown(f"""
-    <div class="topic-card">
-        <div style="display: flex; justify-content: space-between; align-items: center;">
-            <div>
-                <strong>{filename}</strong>
-                <div style="font-size: 0.875rem; color: #6B7280; margin-top: 0.25rem;">
-                    Size: {filesize}
-                </div>
-            </div>
-            <div style="color: var(--secondary-color); font-weight: 500;">
-                Uploaded
-            </div>
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
-
-def main():
+def setup_page():
+    """Configure Streamlit page and apply custom styling."""
     st.set_page_config(
-        page_title="QUINNS Training Generator Pro",
+        page_title="Enhanced Training Generator",
         page_icon="📚",
         layout="wide",
         initial_sidebar_state="expanded"
     )
     
-    load_custom_css()
+    initialize_session_state()
     
-    # Initialize session state
-    if 'generator' not in st.session_state:
-        st.session_state.generator = None
-    if 'api_key' not in st.session_state:
-        st.session_state.api_key = OPENAI_API_KEY
-    if 'topics' not in st.session_state:
-        st.session_state.topics = []
-    if 'outline' not in st.session_state:
-        st.session_state.outline = {}
-    if 'content' not in st.session_state:
-        st.session_state.content = ""
-    if 'step' not in st.session_state:
-        st.session_state.step = "upload"
-    if 'output_files' not in st.session_state:
-        st.session_state.output_files = {}
-    if 'file_paths' not in st.session_state:
-        st.session_state.file_paths = []
-    if 'max_slides_per_module' not in st.session_state:
-        st.session_state.max_slides_per_module = 12
-    if 'target_total_slides' not in st.session_state:
-        st.session_state.target_total_slides = 36
-    if 'combined_content' not in st.session_state:
-        st.session_state.combined_content = ""
-    if 'template' not in st.session_state:
-        st.session_state.template = "corporate"
-    if 'training_duration' not in st.session_state:
-        st.session_state.training_duration = "1 day"
-    if 'include_assessments' not in st.session_state:
-        st.session_state.include_assessments = True
-    if 'pace' not in st.session_state:
-        st.session_state.pace = "medium"
-    if 'quality_analysis' not in st.session_state:
-        st.session_state.quality_analysis = {}
-    if 'brand_config' not in st.session_state:
-        st.session_state.brand_config = {}
-    if 'training_type' not in st.session_state:
-        st.session_state.training_type = "Auto-Detect"
-    if 'session_duration' not in st.session_state:
-        st.session_state.session_duration = "Half Day (4 hours)"
-    if 'target_slide_count' not in st.session_state:
-        st.session_state.target_slide_count = "Auto-calculated"
-    if 'include_activities' not in st.session_state:
-        st.session_state.include_activities = True
-    if 'add_break_slides' not in st.session_state:
-        st.session_state.add_break_slides = False
-    if 'enhanced_speaker_notes' not in st.session_state:
-        st.session_state.enhanced_speaker_notes = True
-    if 'professional_templates' not in st.session_state:
-        st.session_state.professional_templates = True
-    if 'duration_mode' not in st.session_state:
-        st.session_state.duration_mode = "Preset"
-    if 'slide_mode' not in st.session_state:
-        st.session_state.slide_mode = "Auto-Calculate"
-    if 'custom_duration_value' not in st.session_state:
-        st.session_state.custom_duration_value = 4
-    if 'custom_duration_unit' not in st.session_state:
-        st.session_state.custom_duration_unit = "Hours"
+    # Apply theme-specific CSS
+    theme_css = get_theme_css(st.session_state.theme)
+    st.markdown(theme_css, unsafe_allow_html=True)
+
+def display_header():
+    """Display main application header with theme toggle."""
+    col1, col2, col3 = st.columns([1, 3, 1])
     
-    # Initialize generator
-    if 'generator' not in st.session_state or st.session_state.generator is None:
-        try:
-            st.session_state.generator = TrainingGenerator(
-                OPENAI_API_KEY,
-                st.session_state.brand_config
-            )
-            logger.info("Generator initialized successfully")
-        except Exception as e:
-            st.error(f"Error initializing generator: {e}")
-            logger.error(f"Generator initialization failed: {e}")
-            st.stop()
+    with col1:
+        # Theme toggle button
+        theme_icon = "🌙" if st.session_state.theme == "dark" else "☀️"
+        theme_text = "Light Mode" if st.session_state.theme == "dark" else "Dark Mode"
+        
+        if st.button(f"{theme_icon} {theme_text}", key="theme_toggle"):
+            st.session_state.theme = "light" if st.session_state.theme == "dark" else "dark"
+            st.rerun()
     
-    # Sidebar configuration
-    with st.sidebar:
-        st.markdown('<div class="sidebar-section-header">🎯 Training Configuration</div>', unsafe_allow_html=True)
-        
-        # Training Type
-        st.markdown('<div class="config-field-label">Training Type</div>', unsafe_allow_html=True)
-        training_types = [
-            "Auto-Detect",
-            "Corporate Training",
-            "Technical Skills",
-            "Compliance & Safety",
-            "New Employee Onboarding",
-            "Leadership Development",
-            "Sales Training",
-            "Customer Service",
-            "Soft Skills",
-            "Product Training"
-        ]
-        st.session_state.training_type = st.selectbox(
-            "Training Type",
-            options=training_types,
-            index=training_types.index(st.session_state.training_type),
-            label_visibility="collapsed",
-            help="Select training type or let AI auto-detect from your content"
-        )
-        
-        # Session Duration with Custom Input
-        st.markdown('<div class="config-field-label">Session Duration</div>', unsafe_allow_html=True)
-        
-        duration_mode = st.radio(
-            "Duration Mode",
-            options=["Preset", "Custom"],
-            horizontal=True,
-            label_visibility="collapsed",
-            key="duration_mode_radio"
-        )
-        
-        if duration_mode == "Preset":
-            duration_options = [
-                "30 Minutes",
-                "1 Hour",
-                "2 Hours",
-                "Half Day (4 hours)",
-                "Full Day (8 hours)",
-                "2 Days",
-                "3 Days",
-                "1 Week"
-            ]
-            selected_duration = st.selectbox(
-                "Select Duration",
-                options=duration_options,
-                index=3,
-                label_visibility="collapsed"
-            )
+    with col2:
+        st.markdown("""
+        <div style="text-align: center; padding: 2rem 0;">
+            <div style="display: flex; align-items: center; justify-content: center; margin-bottom: 1rem;">
+                <span style="font-size: 3rem;">✨</span>
+                <h1 style="font-size: 3.5rem; margin: 0 1.5rem; background: linear-gradient(135deg, #667eea 0%, #764ba2 50%, #f093fb 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; font-weight: 800;">
+                    QTS Training Generator
+                </h1>
+                <span style="font-size: 3rem;">💫</span>
+            </div>
+            <p style="font-size: 1.3rem; margin-bottom: 1rem;">
+                Transform documents into professional training materials
+            </p>
             
-            duration_mapping = {
-                "30 Minutes": "30 minutes",
-                "1 Hour": "1 hour",
-                "2 Hours": "2 hours",
-                "Half Day (4 hours)": "half day",
-                "Full Day (8 hours)": "1 day",
-                "2 Days": "2 days",
-                "3 Days": "3 days",
-                "1 Week": "1 week"
-            }
-            st.session_state.training_duration = duration_mapping[selected_duration]
-            st.session_state.session_duration = selected_duration
-        else:
-            col1, col2 = st.columns([3, 2])
-            with col1:
-                custom_duration_value = st.number_input(
-                    "Duration Value",
-                    min_value=1,
-                    max_value=100,
-                    value=st.session_state.custom_duration_value,
-                    label_visibility="collapsed",
-                    key="custom_duration_val"
-                )
-                st.session_state.custom_duration_value = custom_duration_value
-            with col2:
-                duration_unit = st.selectbox(
-                    "Unit",
-                    options=["Minutes", "Hours", "Days"],
-                    index=1,
-                    label_visibility="collapsed",
-                    key="custom_duration_unit_select"
-                )
-                st.session_state.custom_duration_unit = duration_unit
+        </div>
+        """, unsafe_allow_html=True)
+    
+    
+def display_phase_tracker():
+    """Display phase tracker."""
+    phases = [
+        ("📄", "Upload", PHASE_1, "#667eea"),
+        ("🔍", "Analyze", PHASE_2, "#764ba2"),
+        ("✏️", "Edit", PHASE_3, "#f093fb"),
+        ("🎨", "Generate", PHASE_4, "#4facfe")
+    ]
+    
+    st.markdown("<div style='padding: 2rem 0;'>", unsafe_allow_html=True)
+    
+    cols = st.columns(4)
+    
+    for col, (icon, name, phase_id, color) in zip(cols, phases):
+        with col:
+            is_current = st.session_state.current_phase == phase_id
+            is_complete = st.session_state.phase_completed.get(phase_id, False)
             
-            st.session_state.session_duration = f"{custom_duration_value} {duration_unit}"
-            st.session_state.training_duration = f"{custom_duration_value} {duration_unit.lower()}"
-            
-            st.markdown(
-                f'<div class="input-helper-text">Total: {custom_duration_value} {duration_unit}</div>',
-                unsafe_allow_html=True
-            )
-        
-        # Target Slide Count with Custom Input
-        st.markdown('<div class="config-field-label">Target Slide Count</div>', unsafe_allow_html=True)
-        
-        slide_mode = st.radio(
-            "Slide Count Mode",
-            options=["Auto-Calculate", "Custom"],
-            horizontal=True,
-            label_visibility="collapsed",
-            key="slide_mode_radio"
-        )
-        
-        if slide_mode == "Auto-Calculate":
-            duration_to_minutes = {
-                "30 minutes": 30,
-                "1 hour": 60,
-                "2 hours": 120,
-                "half day": 240,
-                "1 day": 480,
-                "2 days": 960,
-                "3 days": 1440,
-                "1 week": 2400
-            }
-            
-            duration_str = st.session_state.training_duration
-            if "minutes" in duration_str:
-                target_minutes = int(duration_str.split()[0])
-            elif "hours" in duration_str:
-                target_minutes = int(duration_str.split()[0]) * 60
-            elif "days" in duration_str:
-                target_minutes = int(duration_str.split()[0]) * 480
+            if is_complete:
+                badge_class = "phase-complete"
+                display_icon = "✅"
+            elif is_current:
+                badge_class = "phase-active"
+                display_icon = icon
             else:
-                target_minutes = duration_to_minutes.get(duration_str, 240)
+                badge_class = "phase-pending"
+                display_icon = icon
             
-            slides_needed = int(target_minutes / 5 * 0.75)
-            estimated_modules = min(5, max(3, slides_needed // 15))
-            st.session_state.max_slides_per_module = max(10, slides_needed // estimated_modules)
-            st.session_state.target_total_slides = slides_needed
+            st.markdown(f"""
+            <div style="text-align: center;">
+                <div style="width: 70px; height: 70px; margin: 0 auto 0.5rem; border-radius: 50%; 
+                     display: flex; align-items: center; justify-content: center; font-size: 2rem;
+                     background: {'linear-gradient(135deg, ' + color + ', ' + color + 'dd)' if (is_current or is_complete) else 'rgba(128, 128, 128, 0.3)'};
+                     border: 2px solid {'rgba(255, 255, 255, 0.5)' if (is_current or is_complete) else 'rgba(128, 128, 128, 0.3)'};
+                     box-shadow: {'0 4px 15px ' + color + '40' if is_current else 'none'};
+                     transition: all 0.3s ease;">
+                    {display_icon}
+                </div>
+                <div class="phase-badge {badge_class}" style="width: 100%; font-size: 0.9rem;">
+                    {name}
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+    
+    st.markdown("</div>", unsafe_allow_html=True)
+
+# ============================================================================
+# SIDEBAR WITH IMPROVED API KEY DISPLAY
+# ============================================================================
+
+def render_sidebar():
+    """Render sidebar with configuration options."""
+    with st.sidebar:
+        st.markdown("## ⚙️ Configuration")
+        
+        # API Key section with auto-load info
+        st.markdown("### 🔑 API Key")
+        
+        if st.session_state.api_key:
+            st.success(f"✅ API Key loaded")
+            st.caption("Key loaded from secrets.toml")
             
-            st.info(f"📊 Auto-calculated: **{slides_needed} slides** (~{st.session_state.max_slides_per_module} per module)")
+            if st.button("🔄 Use Different Key", use_container_width=True):
+                manual_key = st.text_input(
+                    "Enter New API Key",
+                    type="password",
+                    key="manual_api_key_input"
+                )
+                if manual_key and validate_api_key(manual_key):
+                    st.session_state.api_key = manual_key
+                    st.success("✅ New API key set!")
+                    time.sleep(1)
+                    st.rerun()
         else:
-            col1, col2 = st.columns([3, 2])
-            with col1:
-                total_slides = st.number_input(
-                    "Total Slides",
-                    min_value=5,
-                    max_value=500,
-                    value=st.session_state.target_total_slides,
-                    step=5,
-                    help="Total number of slides to generate",
-                    key="custom_total_slides"
-                )
-            with col2:
-                num_modules = st.number_input(
-                    "Modules",
-                    min_value=1,
-                    max_value=20,
-                    value=3,
-                    help="Number of modules",
-                    key="custom_num_modules"
-                )
+            st.warning("⚠️ No API key found")
+            st.info("💡 Add OPENAI_API_KEY to .streamlit/secrets.toml file or enter manually below")
             
-            st.session_state.target_total_slides = total_slides
-            st.session_state.max_slides_per_module = max(5, total_slides // num_modules)
-            
-            estimated_time = total_slides * 5
-            st.markdown(
-                f'<div class="input-helper-text">Est. time: {estimated_time//60}h {estimated_time%60}m '
-                f'(~{st.session_state.max_slides_per_module} slides/module)</div>',
-                unsafe_allow_html=True
+            api_key = st.text_input(
+                "OpenAI API Key",
+                type="password",
+                key="api_key_input"
             )
-        
-        st.markdown('<div class="sidebar-divider"></div>', unsafe_allow_html=True)
-        
-        # Enhancement Options
-        st.markdown('<div class="enhancement-header">✨ Enhancement Options</div>', unsafe_allow_html=True)
-        
-        st.session_state.include_activities = st.toggle(
-            "Include Interactive Activities",
-            value=st.session_state.include_activities,
-            help="Add hands-on exercises, group discussions, and interactive elements"
-        )
-        
-        st.session_state.add_break_slides = st.toggle(
-            "Add Break Slides",
-            value=st.session_state.add_break_slides,
-            help="Insert break reminder slides at regular intervals"
-        )
-        
-        st.session_state.enhanced_speaker_notes = st.toggle(
-            "Enhanced Speaker Notes",
-            value=st.session_state.enhanced_speaker_notes,
-            help="Generate detailed presenter notes with timing and tips"
-        )
-        
-        st.session_state.professional_templates = st.toggle(
-            "Professional Templates",
-            value=st.session_state.professional_templates,
-            help="Use professionally designed slide layouts and themes"
-        )
-        
-        st.session_state.include_assessments = st.toggle(
-            "Generate Assessments",
-            value=st.session_state.get('include_assessments', True),
-            help="Create quiz questions and knowledge checks"
-        )
-        
-        st.markdown('<div class="sidebar-divider"></div>', unsafe_allow_html=True)
-        
-        # Show estimated generation target
-        if 'target_total_slides' in st.session_state and st.session_state.target_total_slides:
-            st.markdown("### 📈 Generation Target")
-            st.info(f"**Target Slides:** {st.session_state.target_total_slides} slides\n\n"
-                   f"**Per Module:** ~{st.session_state.max_slides_per_module} slides\n\n"
-                   f"**Estimated Duration:** {st.session_state.session_duration}")
-        
-        st.markdown('<div class="sidebar-divider"></div>', unsafe_allow_html=True)
-        
-        # Quick Stats
-        st.markdown("### 📊 Quick Stats")
-        if st.session_state.step != "upload":
-            if st.session_state.file_paths:
-                st.metric("Documents Uploaded", len(st.session_state.file_paths))
             
-            if st.session_state.topics:
-                st.metric("Topics Identified", len(st.session_state.topics))
-            
-            if st.session_state.outline and st.session_state.outline.get('modules'):
-                st.metric("Modules Created", len(st.session_state.outline['modules']))
-        
-        st.markdown('<div class="sidebar-divider"></div>', unsafe_allow_html=True)
-        
-        # About Section
-        with st.expander("ℹ️ About QUINNS Pro"):
-            st.markdown("""
-            **Advanced Features:**
-            - AI-powered content analysis
-            - Auto-detected training types
-            - Smart slide calculation
-            - Quality metrics
-            - Assessment generation
-            - Brand customization
-            - Multiple export formats
-            """)
-        
-        # Tips Section
-        with st.expander("💡 Tips & Best Practices"):
-            st.markdown("""
-            **For Best Results:**
-            1. Upload complete, well-structured documents
-            2. Let AI auto-detect training type
-            3. Use auto-calculated slide count
-            4. Enable interactive activities
-            5. Review quality metrics
-            6. Customize outline before generation
-            """)
-    
-    # Main content area
-    st.title("🎓 QUINNS Training Generator Pro")
-    
-    
-    
-    # Render step indicator
-    render_step_indicator(st.session_state.step)
-    
-    # STEP 1: Upload Documents
-    if st.session_state.step == "upload":
-        st.markdown("## 📤 Upload Training Documents")
-        st.markdown("Upload one or more documents to generate comprehensive training materials.")
-        
-        uploaded_files = st.file_uploader(
-            "Choose your documents",
-            type=["pdf", "docx", "pptx", "txt", "md"],
-            accept_multiple_files=True,
-            help="Upload multiple documents - they will be combined for analysis"
-        )
-        
-        if uploaded_files:
-            st.markdown("### 📋 Uploaded Files")
-            
-            for idx, uploaded_file in enumerate(uploaded_files):
-                filesize = f"{uploaded_file.size / 1024:.1f} KB" if uploaded_file.size < 1024*1024 else f"{uploaded_file.size / (1024*1024):.1f} MB"
-                render_file_card(uploaded_file.name, filesize, idx)
-            
-            col1, col2 = st.columns([1, 4])
-            with col1:
-                if st.button("🚀 Process Documents", use_container_width=True):
-                    if not st.session_state.api_key:
-                        st.error("⚠️ API key not configured.")
-                    elif 'generator' not in st.session_state or st.session_state.generator is None:
-                        st.error("⚠️ System not initialized. Please refresh the page.")
-                    else:
-                        st.session_state.file_paths = []
-                        for uploaded_file in uploaded_files:
-                            temp_path = TEMP_DIR / uploaded_file.name
-                            with open(temp_path, "wb") as f:
-                                f.write(uploaded_file.getvalue())
-                            st.session_state.file_paths.append(temp_path)
-                        
-                        with st.spinner("🔄 Processing your documents..."):
-                            try:
-                                combined_content = ""
-                                for file_path in st.session_state.file_paths:
-                                    content = asyncio.run(st.session_state.generator.process_document(file_path))
-                                    combined_content += f"\n\n=== Content from {file_path.name} ===\n\n{content}"
-                                
-                                st.session_state.combined_content = combined_content
-                                
-                                if st.session_state.training_type == "Auto-Detect":
-                                    with st.spinner("🔍 Detecting training type..."):
-                                        detected_type = st.session_state.generator.content_analyzer.detect_training_type(combined_content)
-                                        st.session_state.training_type = detected_type
-                                        st.success(f"✅ Detected training type: **{detected_type}**")
-                                
-                                if combined_content:
-                                    st.success(f"✅ Successfully processed {len(uploaded_files)} document(s)")
-                                    time.sleep(1)
-                                    st.session_state.step = "topics"
-                                    st.rerun()
-                                else:
-                                    st.error("❌ Could not extract content from documents")
-                            except Exception as e:
-                                st.error(f"❌ Error: {str(e)}")
-    
-    # STEP 2: Review Topics
-    elif st.session_state.step == "topics":
-        st.markdown("## 🎯 Content Analysis & Topic Review")
-        
-        st.markdown(f"""
-        <div class="info-box info">
-            <strong>📋 Training Type:</strong> {st.session_state.training_type}<br>
-            <strong>⏱️ Target Duration:</strong> {st.session_state.session_duration}<br>
-            <strong>📊 Slide Configuration:</strong> ~{st.session_state.max_slides_per_module} slides per module
-        </div>
-        """, unsafe_allow_html=True)
-        
-        if not st.session_state.topics:
-            # Safety check
-            if 'generator' not in st.session_state or st.session_state.generator is None:
-                st.error("⚠️ System not initialized. Please go back and try again.")
-                if st.button("← Go Back"):
-                    st.session_state.step = "upload"
+            if api_key:
+                if validate_api_key(api_key):
+                    st.session_state.api_key = api_key
+                    st.success("✅ API key validated")
+                    time.sleep(1)
                     st.rerun()
-                st.stop()
-            
-            with st.spinner("🔍 Analyzing content and extracting topics..."):
-                try:
-                    topics, outline = asyncio.run(
-                        st.session_state.generator.analyze_content(
-                            st.session_state.combined_content,
-                            st.session_state.training_duration
-                        )
-                    )
-                    st.session_state.topics = topics
-                    st.session_state.outline = outline
-                    
-                    quality = asyncio.run(
-                        st.session_state.generator.analyze_quality(
-                            st.session_state.combined_content,
-                            outline
-                        )
-                    )
-                    st.session_state.quality_analysis = quality
-                    
-                except Exception as e:
-                    st.error(f"❌ Error: {str(e)}")
-                    logger.error(f"Analysis error: {e}")
-                    if st.button("← Go Back"):
-                        st.session_state.step = "upload"
-                        st.rerun()
-        
-        if st.session_state.topics and st.session_state.quality_analysis:
-            st.markdown("### Quality Analysis")
-            
-            qa = st.session_state.quality_analysis
-            col1, col2, col3, col4 = st.columns(4)
-            
-            with col1:
-                st.markdown(f"""
-                <div class="metric-card" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);">
-                    <div class="metric-label">Overall Score</div>
-                    <div class="metric-value">{qa.get('overall_score', 0)}/100</div>
-                </div>
-                """, unsafe_allow_html=True)
-            
-            with col2:
-                st.markdown(f"""
-                <div class="metric-card" style="background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);">
-                    <div class="metric-label">Readability</div>
-                    <div class="metric-value">{qa.get('readability_score', 0)}/100</div>
-                </div>
-                """, unsafe_allow_html=True)
-            
-            with col3:
-                st.markdown(f"""
-                <div class="metric-card" style="background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);">
-                    <div class="metric-label">Completeness</div>
-                    <div class="metric-value">{qa.get('completeness_score', 0)}/100</div>
-                </div>
-                """, unsafe_allow_html=True)
-            
-            with col4:
-                st.markdown(f"""
-                <div class="metric-card" style="background: linear-gradient(135deg, #43e97b 0%, #38f9d7 100%);">
-                    <div class="metric-label">Engagement</div>
-                    <div class="metric-value">{qa.get('engagement_score', 0)}/100</div>
-                </div>
-                """, unsafe_allow_html=True)
-            
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                st.markdown("#### Strengths")
-                for strength in qa.get('strengths', []):
-                    st.markdown(f"- {strength}")
-            
-            with col2:
-                st.markdown("#### Suggested Improvements")
-                for improvement in qa.get('improvements', []):
-                    st.markdown(f"- {improvement}")
-            
-            st.markdown("---")
-            
-            st.markdown("### Select Topics to Include")
-            
-            cols = st.columns(2)
-            selected_topics = []
-            
-            for i, topic in enumerate(st.session_state.topics):
-                with cols[i % 2]:
-                    badge_class = f"badge-{topic.get('importance', 'medium')}"
-                    
-                    st.markdown(f"""
-                    <div class="topic-card">
-                        <strong>{topic.get('title', 'Topic')}</strong>
-                        <span class="topic-badge {badge_class}">{topic.get('importance', 'medium').upper()}</span>
-                        <div style="font-size: 0.875rem; color: #6B7280; margin-top: 0.5rem;">
-                            {topic.get('description', '')}
-                        </div>
-                        <div style="font-size: 0.75rem; color: #9CA3AF; margin-top: 0.25rem;">
-                            Est. {topic.get('estimated_duration_minutes', 30)} minutes
-                        </div>
-                    </div>
-                    """, unsafe_allow_html=True)
-                    
-                    selected = st.checkbox(
-                        f"Include this topic",
-                        value=topic.get('importance') in ['high', 'medium'],
-                        key=f"topic_{i}",
-                        label_visibility="collapsed"
-                    )
-                    
-                    if selected:
-                        selected_topics.append(topic)
-            
-            st.markdown("---")
-            
-            col1, col2, col3 = st.columns([1, 1, 3])
-            
-            with col1:
-                if st.button("← Back", use_container_width=True):
-                    st.session_state.step = "upload"
-                    st.rerun()
-            
-            with col2:
-                if st.button("Next: Edit Outline →", use_container_width=True):
-                    if selected_topics:
-                        st.session_state.step = "edit"
-                        st.rerun()
-                    else:
-                        st.warning("⚠️ Please select at least one topic")
-    
-    # STEP 3: Edit Outline
-    elif st.session_state.step == "edit":
-        st.markdown("## ✏️ Edit Training Outline")
-        
-        estimated_slides = sum(m.get('estimated_slides', 8) for m in st.session_state.outline.get('modules', []))
-        duration_info = calculate_training_duration(estimated_slides, st.session_state.pace, st.session_state.include_assessments)
-        
-        st.markdown(f"""
-        <div class="info-box info">
-            <strong>Estimated Training Duration:</strong> {format_duration_display(duration_info)}<br>
-            <strong>Estimated Slides:</strong> {estimated_slides}<br>
-            <strong>Training Type:</strong> {st.session_state.training_type}
-        </div>
-        """, unsafe_allow_html=True)
-        
-        st.markdown("### Training Overview")
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            outline_title = st.text_input(
-                "Training Title",
-                value=st.session_state.outline.get('title', 'Professional Training Program')
-            )
-            st.session_state.outline['title'] = outline_title
-            
-            target_audience = st.text_input(
-                "Target Audience",
-                value=st.session_state.outline.get('target_audience', 'Professionals')
-            )
-            st.session_state.outline['target_audience'] = target_audience
-        
-        with col2:
-            description = st.text_area(
-                "Description",
-                value=st.session_state.outline.get('description', 'Comprehensive training program'),
-                height=100
-            )
-            st.session_state.outline['description'] = description
-        
-        prerequisites = st.text_input(
-            "Prerequisites",
-            value=st.session_state.outline.get('prerequisites', 'Basic knowledge')
-        )
-        st.session_state.outline['prerequisites'] = prerequisites
-        
-        st.markdown("### Learning Objectives")
-        
-        objectives = st.session_state.outline.get('objectives', [])
-        
-        for idx, obj in enumerate(objectives):
-            col1, col2 = st.columns([5, 1])
-            with col1:
-                new_obj = st.text_input(
-                    f"Objective {idx + 1}",
-                    value=obj,
-                    key=f"obj_{idx}",
-                    label_visibility="collapsed"
-                )
-                objectives[idx] = new_obj
-            with col2:
-                if st.button("Delete", key=f"del_obj_{idx}"):
-                    objectives.pop(idx)
-                    st.rerun()
-        
-        if st.button("Add Objective"):
-            objectives.append("New learning objective")
-            st.session_state.outline['objectives'] = objectives
-            st.rerun()
-        
-        st.session_state.outline['objectives'] = objectives
-        
-        st.markdown("### Training Modules")
-        
-        modules = st.session_state.outline.get('modules', [])
-        
-        for mod_idx, module in enumerate(modules):
-            with st.expander(f"Module {mod_idx + 1}: {module.get('title', 'Module')}", expanded=False):
-                col1, col2 = st.columns(2)
-                
-                with col1:
-                    module['title'] = st.text_input(
-                        "Module Title",
-                        value=module.get('title', ''),
-                        key=f"mod_title_{mod_idx}"
-                    )
-                
-                with col2:
-                    module['duration'] = st.text_input(
-                        "Duration",
-                        value=module.get('duration', '45 minutes'),
-                        key=f"mod_duration_{mod_idx}"
-                    )
-                
-                st.markdown("**Module Objectives:**")
-                mod_objectives = module.get('objectives', [])
-                
-                for obj_idx, obj in enumerate(mod_objectives):
-                    col1, col2 = st.columns([5, 1])
-                    with col1:
-                        mod_objectives[obj_idx] = st.text_input(
-                            f"Objective",
-                            value=obj,
-                            key=f"mod_{mod_idx}_obj_{obj_idx}",
-                            label_visibility="collapsed"
-                        )
-                    with col2:
-                        if st.button("Delete", key=f"del_mod_{mod_idx}_obj_{obj_idx}"):
-                            mod_objectives.pop(obj_idx)
-                            st.rerun()
-                
-                if st.button("Add Module Objective", key=f"add_mod_obj_{mod_idx}"):
-                    mod_objectives.append("New module objective")
-                    st.rerun()
-                
-                module['objectives'] = mod_objectives
-                
-                st.markdown("**Key Points:**")
-                key_points = module.get('key_points', [])
-                
-                for kp_idx, kp in enumerate(key_points):
-                    col1, col2 = st.columns([5, 1])
-                    with col1:
-                        key_points[kp_idx] = st.text_input(
-                            f"Key Point",
-                            value=kp,
-                            key=f"mod_{mod_idx}_kp_{kp_idx}",
-                            label_visibility="collapsed"
-                        )
-                    with col2:
-                        if st.button("Delete", key=f"del_mod_{mod_idx}_kp_{kp_idx}"):
-                            key_points.pop(kp_idx)
-                            st.rerun()
-                
-                if st.button("Add Key Point", key=f"add_mod_kp_{mod_idx}"):
-                    key_points.append("New key point")
-                    st.rerun()
-                
-                module['key_points'] = key_points
-                
-                if st.button(f"Delete Module {mod_idx + 1}", key=f"del_mod_{mod_idx}"):
-                    modules.pop(mod_idx)
-                    st.rerun()
-        
-        if st.button("Add New Module"):
-            modules.append({
-                "title": "New Module",
-                "duration": "45 minutes",
-                "objectives": ["Module objective"],
-                "topics": ["Module topic"],
-                "key_points": ["Key point"],
-                "activities": ["Group discussion"],
-                "estimated_slides": 8
-            })
-            st.session_state.outline['modules'] = modules
-            st.rerun()
-        
-        st.session_state.outline['modules'] = modules
+                else:
+                    st.error("❌ Invalid API key format")
         
         st.markdown("---")
         
-        col1, col2, col3 = st.columns([1, 1, 3])
+        # Training Settings
+        st.markdown("### 📊 Training Settings")
         
+        duration = st.selectbox(
+            "Training Duration",
+            options=list(DURATION_TO_SLIDES.keys()),
+            index=list(DURATION_TO_SLIDES.keys()).index(st.session_state.training_duration)
+        )
+        st.session_state.training_duration = duration
+        
+        recommended_slides = DURATION_TO_SLIDES[duration]
+        
+        use_custom = st.checkbox(
+            "Custom Slide Count",
+            value=st.session_state.custom_slide_count is not None
+        )
+        
+        if use_custom:
+            custom_slides = st.number_input(
+                "Number of Slides",
+                min_value=10,
+                max_value=720,
+                value=max(10, st.session_state.custom_slide_count or recommended_slides),
+                step=10,
+                help="Use the +/- buttons to adjust"
+            )
+            st.session_state.custom_slide_count = custom_slides
+            st.session_state.target_slides = custom_slides
+        else:
+            st.session_state.custom_slide_count = None
+            st.session_state.target_slides = recommended_slides
+            st.info(f"📊 Recommended: {recommended_slides} slides")
+        
+        modules = st.slider(
+            "Number of Modules",
+            min_value=5,
+            max_value=15,
+            value=st.session_state.target_modules
+        )
+        st.session_state.target_modules = modules
+        
+        st.markdown("---")
+        
+        # Template
+        st.markdown("### 🎨 Template Style")
+        template = st.selectbox(
+            "Select Template",
+            options=TEMPLATE_OPTIONS,
+            index=TEMPLATE_OPTIONS.index(st.session_state.template)
+        )
+        st.session_state.template = template
+        
+        st.markdown("---")
+        
+        # Enhancements
+        st.markdown("### ✨ Enhancements")
+        
+        st.session_state.include_assessments = st.checkbox(
+            "Include AI Assessments",
+            value=st.session_state.include_assessments,
+            help="Generate AI-powered questions with real content"
+        )
+        
+        st.session_state.enhanced_trainer_guide = st.checkbox(
+            "Enhanced Trainer Guide",
+            value=st.session_state.enhanced_trainer_guide
+        )
+        
+        st.markdown("---")
+        
+        # Progress
+        st.markdown("### 📈 Progress")
+        
+        completed = sum(st.session_state.phase_completed.values())
+        progress = completed / 4
+        
+        st.progress(progress)
+        st.caption(f"{completed}/4 phases completed")
+        
+        st.markdown("---")
+        
+        # Quick Navigation
+        st.markdown("### 🔄 Quick Navigation")
+        
+        col1, col2 = st.columns(2)
         with col1:
-            if st.button("Back to Topics", use_container_width=True):
-                st.session_state.step = "topics"
+            if st.button("📄 Phase 1", use_container_width=True):
+                st.session_state.current_phase = PHASE_1
+                st.rerun()
+            if st.button("✏️ Phase 3", use_container_width=True, disabled=not st.session_state.phase_completed.get(PHASE_2)):
+                st.session_state.current_phase = PHASE_3
                 st.rerun()
         
         with col2:
-            if st.button("Generate Materials", type="primary", use_container_width=True):
-                st.session_state.step = "generate"
+            if st.button("🔍 Phase 2", use_container_width=True, disabled=not st.session_state.phase_completed.get(PHASE_1)):
+                st.session_state.current_phase = PHASE_2
                 st.rerun()
+            if st.button("🎨 Phase 4", use_container_width=True, disabled=not st.session_state.phase_completed.get(PHASE_3)):
+                st.session_state.current_phase = PHASE_4
+                st.rerun()
+
+# ============================================================================
+# PHASE RENDERING (Same logic as before, just cleaner)
+# ============================================================================
+
+def render_phase_1():
+    """Render Phase 1: Document Upload."""
+    st.markdown("## 📄 Phase 1: Document Upload & Processing")
     
-    # STEP 4: Generate Materials with Enhanced Progress
-    elif st.session_state.step == "generate":
-        st.markdown("## ⚙️ Generating Training Materials")
-        
-        # Safety check - ensure generator is initialized
-        if 'generator' not in st.session_state or st.session_state.generator is None:
-            st.error("⚠️ Generator not initialized. Returning to previous step...")
-            time.sleep(2)
-            st.session_state.step = "edit"
+    if st.session_state.phase_completed.get(PHASE_1):
+        st.success("✅ Phase 1 completed!")
+        if st.button("➡️ Continue to Phase 2", type="primary", use_container_width=True):
+            st.session_state.current_phase = PHASE_2
             st.rerun()
+        st.markdown("---")
+    
+    uploaded_files = st.file_uploader(
+        "Choose document file(s)",
+        type=SUPPORTED_FORMATS,
+        accept_multiple_files=True
+    )
+    
+    if uploaded_files:
+        st.success(f"✅ {len(uploaded_files)} file(s) uploaded")
         
-        output_dir = OUTPUT_DIR
-        output_dir.mkdir(exist_ok=True)
+        if st.button("🔄 Process Document(s)", type="primary", use_container_width=True):
+            if not st.session_state.api_key:
+                st.error("⚠️ Please set your OpenAI API key")
+                return
+            
+            with st.spinner("Processing..."):
+                try:
+                    processor = DocumentProcessor()
+                    combined_text = []
+                    total_words = 0
+                    
+                    for file in uploaded_files:
+                        processed = processor.process_file(file)
+                        combined_text.append(processed['text'])
+                        total_words += processed['word_count']
+                    
+                    final_text = '\n\n'.join(combined_text)
+                    
+                    st.session_state.full_source_text = final_text
+                    st.session_state.processed_content = {
+                        'text': final_text[:20000],
+                        'word_count': total_words,
+                        'file_count': len(uploaded_files)
+                    }
+                    st.session_state.phase_completed[PHASE_1] = True
+                    
+                    st.success(f"✅ Processed {total_words} words from {len(uploaded_files)} file(s)")
+                    
+                    if st.button("➡️ Proceed to Phase 2", type="primary", use_container_width=True):
+                        st.session_state.current_phase = PHASE_2
+                        st.rerun()
+                    
+                except Exception as e:
+                    st.error(f"❌ Error: {str(e)}")
+    else:
+        st.info("📁 Upload documents to begin")
+
+def render_phase_2():
+    """Render Phase 2: Topic Analysis."""
+    st.markdown("## 🔍 Phase 2: Topic Analysis")
+    
+    if not st.session_state.processed_content:
+        st.warning("⚠️ Complete Phase 1 first")
+        return
+    
+    if st.button("🚀 Extract Topics & Generate Outline", type="primary", use_container_width=True):
+        if not st.session_state.api_key:
+            st.error("⚠️ Enter API key first")
+            return
         
-        if 'generation_complete' not in st.session_state:
-            st.session_state.generation_complete = False
-            
-            progress_container = st.container()
-            status_container = st.container()
-            details_container = st.container()
-            
-            with progress_container:
-                progress_bar = st.progress(0)
-                progress_text = st.empty()
-            
-            with status_container:
-                status_col1, status_col2, status_col3 = st.columns(3)
-                with status_col1:
-                    current_step_display = st.empty()
-                with status_col2:
-                    elapsed_time_display = st.empty()
-                with status_col3:
-                    remaining_time_display = st.empty()
-            
-            with details_container:
-                detail_expander = st.expander("📊 Detailed Progress", expanded=True)
-                with detail_expander:
-                    detail_text = st.empty()
-            
+        with st.spinner("Analyzing..."):
             try:
-                temp_content_file = TEMP_DIR / "combined_content.txt"
-                with open(temp_content_file, "w", encoding="utf-8") as f:
-                    f.write(st.session_state.combined_content)
+                analyzer = TopicAnalyzer(st.session_state.api_key)
+                topics = analyzer.extract_topics(
+                    st.session_state.full_source_text,
+                    num_topics=st.session_state.target_modules
+                )
                 
-                # Store generator reference to avoid session state issues in thread
-                generator = st.session_state.generator
-                max_slides = st.session_state.max_slides_per_module
-                include_assess = st.session_state.include_assessments
-                train_duration = st.session_state.training_duration
+                generator = OutlineGenerator(st.session_state.api_key)
+                outline = generator.generate_outline(
+                    topics=topics,
+                    target_modules=st.session_state.target_modules,
+                    target_slides=st.session_state.target_slides,
+                    duration=st.session_state.training_duration
+                )
                 
-                async def generate_with_progress():
-                    result = await generator.generate_training_materials(
-                        temp_content_file,
-                        output_dir,
-                        max_slides,
-                        include_assess,
-                        train_duration
-                    )
-                    return result
+                st.session_state.extracted_topics = topics
+                st.session_state.generated_outline = outline
+                st.session_state.phase_completed[PHASE_2] = True
                 
-                result_queue = queue.Queue()
+                st.success("✅ Analysis complete!")
                 
-                def run_generation():
-                    try:
-                        result = asyncio.run(generate_with_progress())
-                        result_queue.put(("success", result))
-                    except Exception as e:
-                        logger.error(f"Generation error: {e}")
-                        result_queue.put(("error", str(e)))
-                
-                generation_thread = threading.Thread(target=run_generation)
-                generation_thread.start()
-                
-                last_update = time.time()
-                while generation_thread.is_alive() or not result_queue.empty():
-                    try:
-                        progress_info = generator.progress_tracker.get_info()
-                        
-                        # Update UI elements
-                        progress_bar.progress(min(progress_info['progress_percent'] / 100, 1.0))
-                        progress_text.markdown(f"**{progress_info['progress_percent']}%** - {progress_info['message']}")
-                        
-                        current_step_display.metric(
-                            "Current Step",
-                            progress_info['current_step'].replace('_', ' ').title() if progress_info['current_step'] else "Initializing"
-                        )
-                        
-                        elapsed_min = int(progress_info['elapsed_seconds'] // 60)
-                        elapsed_sec = int(progress_info['elapsed_seconds'] % 60)
-                        elapsed_time_display.metric(
-                            "Elapsed Time",
-                            f"{elapsed_min}m {elapsed_sec}s"
-                        )
-                        
-                        if progress_info['remaining_seconds'] > 0:
-                            remaining_min = int(progress_info['remaining_seconds'] // 60)
-                            remaining_sec = int(progress_info['remaining_seconds'] % 60)
-                            remaining_time_display.metric(
-                                "Est. Remaining",
-                                f"{remaining_min}m {remaining_sec}s"
-                            )
-                        
-                        detail_text.markdown(f"""
-                        **Status:** {progress_info['status'].upper()}  
-                        **Step:** {progress_info['current_step'].replace('_', ' ').title() if progress_info['current_step'] else "Initializing"}  
-                        **Progress:** {progress_info['completed_steps']}/{progress_info['total_steps']} steps completed  
-                        
-                        {progress_info['message']}
-                        """)
-                        
-                        # Check for completion
-                        if not result_queue.empty():
-                            status, data = result_queue.get()
-                            if status == "success":
-                                st.session_state.output_files = data
-                                st.session_state.generation_complete = True
-                                progress_bar.progress(1.0)
-                                progress_text.markdown("**100%** - ✅ Generation complete!")
-                                break
-                            else:
-                                raise Exception(data)
-                        
-                        time.sleep(0.5)
-                    
-                    except Exception as inner_e:
-                        logger.error(f"Progress update error: {inner_e}")
-                        # Continue anyway to check result queue
-                        time.sleep(0.5)
-                
-                
-                # Wait for thread to complete with timeout
-                generation_thread.join(timeout=5)
-                
-                # CRITICAL FIX: Final check of queue after thread completes
-                # This ensures we don't miss the result if it was added right as the thread finished
-                if not result_queue.empty():
-                    try:
-                        status, data = result_queue.get_nowait()
-                        logger.info(f"Final queue check - Status: {status}")
-                        if status == "success":
-                            st.session_state.output_files = data
-                            st.session_state.generation_complete = True
-                            progress_bar.progress(1.0)
-                            progress_text.markdown("**100%** - ✅ Generation complete!")
-                            logger.info("Output files saved to session state")
-                        else:
-                            raise Exception(data)
-                    except queue.Empty:
-                        logger.warning("Queue was empty on final check")
-                
-                # Force rerun if generation completed
-                if st.session_state.get('generation_complete', False):
-                    logger.info("Triggering rerun to display results")
-                    time.sleep(1)
+                if st.button("➡️ Proceed to Phase 3", type="primary", use_container_width=True):
+                    st.session_state.current_phase = PHASE_3
                     st.rerun()
-                    
-                    
+                
             except Exception as e:
                 st.error(f"❌ Error: {str(e)}")
-                logger.error(f"Generation failed with error: {e}")
-                if st.button("Try Again"):
-                    if 'generation_complete' in st.session_state:
-                        del st.session_state['generation_complete']
-                    st.session_state.step = "edit"
-                    st.rerun()
+    
+    elif st.session_state.generated_outline:
+        st.info("✅ Analysis completed")
+        if st.button("➡️ Proceed to Phase 3", type="primary", use_container_width=True):
+            st.session_state.current_phase = PHASE_3
+            st.rerun()
+
+def render_phase_3():
+    """Render Phase 3: Content Editing."""
+    st.markdown("## ✏️ Phase 3: Content Review & Editing")
+    
+    if not st.session_state.generated_outline:
+        st.warning("⚠️ Complete Phase 2 first")
+        return
+    
+    tab1, tab2 = st.tabs(["📋 Topics", "📝 Outline"])
+    
+    with tab1:
+        topics = st.session_state.edited_topics or st.session_state.extracted_topics
+        edited_topics = ContentEditor.render_topics_editor(topics)
+        st.session_state.edited_topics = edited_topics
+    
+    with tab2:
+        outline = st.session_state.edited_outline or st.session_state.generated_outline
+        edited_outline = ContentEditor.render_outline_editor(outline)
+        st.session_state.edited_outline = edited_outline
+    
+    st.markdown("---")
+    
+    if st.button("✅ Validate & Continue to Phase 4", type="primary", use_container_width=True):
+        st.session_state.phase_completed[PHASE_3] = True
+        st.session_state.current_phase = PHASE_4
+        st.rerun()
+
+def render_phase_4():
+    """Render Phase 4: Document Generation."""
+    st.markdown("## 🎨 Phase 4: Final Document Generation")
+    
+    if not st.session_state.edited_outline:
+        st.warning("⚠️ Complete Phase 3 first")
+        return
+    
+    outline = st.session_state.edited_outline
+    
+    st.markdown("### 📊 Generation Summary")
+    
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("Modules", outline['total_modules'])
+    with col2:
+        st.metric("Slides", outline['estimated_slides'])
+    with col3:
+        st.metric("Duration", outline['duration'])
+    with col4:
+        st.metric("Assessment", "AI-Powered" if st.session_state.include_assessments else "None")
+    
+    st.markdown("---")
+    
+    if st.button("🚀 Generate Final Documents", type="primary", use_container_width=True):
+        if not st.session_state.api_key:
+            st.error("⚠️ Enter API key first")
+            return
         
-        if st.session_state.generation_complete:
-            st.markdown('<div class="info-box success">', unsafe_allow_html=True)
-            st.markdown("### ✅ Success! Your training materials are ready.")
-            st.markdown('</div>', unsafe_allow_html=True)
-            
-            duration_info = st.session_state.output_files.get('duration_info', {})
-            total_slides = st.session_state.output_files.get('total_slides', 0)
-            
-            col1, col2, col3 = st.columns(3)
-            
-            with col1:
-                st.markdown(f"""
-                <div class="metric-card" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);">
-                    <div class="metric-label">Total Slides</div>
-                    <div class="metric-value">{total_slides}</div>
-                </div>
-                """, unsafe_allow_html=True)
-            
-            with col2:
-                st.markdown(f"""
-                <div class="metric-card" style="background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);">
-                    <div class="metric-label">Training Duration</div>
-                    <div class="metric-value">{format_duration_display(duration_info)}</div>
-                </div>
-                """, unsafe_allow_html=True)
-            
-            with col3:
-                st.markdown(f"""
-                <div class="metric-card" style="background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);">
-                    <div class="metric-label">Modules</div>
-                    <div class="metric-value">{len(st.session_state.outline.get('modules', []))}</div>
-                </div>
-                """, unsafe_allow_html=True)
-            
-            st.markdown("### 📥 Download Your Materials")
-            
-            col1, col2, col3 = st.columns(3)
-            
-            with col1:
-                if 'pptx_path' in st.session_state.output_files:
-                    pptx_path = st.session_state.output_files['pptx_path']
-                    if os.path.exists(pptx_path):
-                        with open(pptx_path, "rb") as f:
-                            st.download_button(
-                                "📊 Download PowerPoint",
-                                f.read(),
-                                file_name=Path(pptx_path).name,
-                                mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-                                use_container_width=True
-                            )
-            
-            with col2:
-                if 'guide_path' in st.session_state.output_files:
-                    guide_path = st.session_state.output_files['guide_path']
-                    if os.path.exists(guide_path):
-                        with open(guide_path, "rb") as f:
-                            st.download_button(
-                                "📖 Download Trainer Guide",
-                                f.read(),
-                                file_name=Path(guide_path).name,
-                                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                                use_container_width=True
-                            )
-            
-            with col3:
-                if st.session_state.include_assessments and st.session_state.output_files.get('assessment_path'):
-                    assessment_path = st.session_state.output_files['assessment_path']
-                    if os.path.exists(assessment_path):
-                        with open(assessment_path, "rb") as f:
-                            st.download_button(
-                                "✅ Download Assessment",
-                                f.read(),
-                                file_name=Path(assessment_path).name,
-                                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                                use_container_width=True
-                            )
-            
-            st.markdown("---")
-            
-            if st.button("🔄 Start New Project", use_container_width=False):
-                keys_to_reset = [
-                    'step', 'topics', 'outline', 'content', 'combined_content',
-                    'output_files', 'file_paths', 'generation_complete',
-                    'max_slides_per_module', 'quality_analysis', 'template',
-                    'training_duration', 'include_assessments', 'pace'
-                ]
-                for key in keys_to_reset:
-                    if key in st.session_state:
-                        del st.session_state[key]
+        with st.spinner("Generating documents..."):
+            try:
+                # Generate slides
+                slide_gen = SlideGenerator(st.session_state.api_key)
+                slide_gen.set_source_content(st.session_state.full_source_text)
                 
-                st.session_state.step = "upload"
-                st.session_state.max_slides_per_module = 12
-                st.session_state.template = "corporate"
-                st.session_state.training_duration = "1 day"
-                st.session_state.include_assessments = True
-                st.session_state.pace = "medium"
-                st.rerun()
+                all_slides = []
+                for module in outline['modules']:
+                    slides = slide_gen.generate_slides_for_module(module)
+                    all_slides.extend(slides)
+                
+                st.session_state.generated_slides = all_slides
+                
+                # Create documents
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                generated_files = {}
+                
+                # PowerPoint
+                pptx_path = OUTPUT_DIR / f"training_{timestamp}.pptx"
+                DocumentBuilder.create_powerpoint(outline, all_slides, pptx_path)
+                generated_files['powerpoint'] = pptx_path
+                
+                # Trainer Guide
+                trainer_path = OUTPUT_DIR / f"trainer_guide_{timestamp}.docx"
+                DocumentBuilder.create_trainer_guide(outline, all_slides, trainer_path)
+                generated_files['trainer_guide'] = trainer_path
+                
+                # AI-Powered Assessment
+                if st.session_state.include_assessments:
+                    assessment_path = OUTPUT_DIR / f"assessment_{timestamp}.docx"
+                    DocumentBuilder.create_assessment(
+                        outline,
+                        assessment_path,
+                        api_key=st.session_state.api_key,
+                        source_content=st.session_state.full_source_text
+                    )
+                    generated_files['assessment'] = assessment_path
+                
+                # ZIP Package
+                zip_path = OUTPUT_DIR / f"training_package_{timestamp}.zip"
+                DocumentBuilder.create_zip_package(list(generated_files.values()), zip_path)
+                generated_files['zip_package'] = zip_path
+                
+                st.session_state.final_documents = generated_files
+                st.session_state.phase_completed[PHASE_4] = True
+                
+                st.success(f"🎉 Generated {len(all_slides)} slides across {len(outline['modules'])} modules!")
+                
+                st.markdown("### 📥 Download Your Materials")
+                
+                cols = st.columns(len(generated_files))
+                icons = {'powerpoint': '📊', 'trainer_guide': '📖', 'assessment': '📋', 'zip_package': '📦'}
+                
+                for col, (doc_type, file_path) in zip(cols, generated_files.items()):
+                    with col:
+                        with open(file_path, 'rb') as f:
+                            st.download_button(
+                                label=f"{icons.get(doc_type, '📄')} {doc_type.replace('_', ' ').title()}",
+                                data=f.read(),
+                                file_name=file_path.name,
+                                use_container_width=True
+                            )
+                
+            except Exception as e:
+                st.error(f"❌ Error: {str(e)}")
+    
+    elif st.session_state.final_documents:
+        st.success("✅ Documents already generated!")
+        
+        st.markdown("### 📥 Download Your Materials")
+        
+        cols = st.columns(len(st.session_state.final_documents))
+        icons = {'powerpoint': '📊', 'trainer_guide': '📖', 'assessment': '📋', 'zip_package': '📦'}
+        
+        for col, (doc_type, file_path) in zip(cols, st.session_state.final_documents.items()):
+            with col:
+                if file_path.exists():
+                    with open(file_path, 'rb') as f:
+                        st.download_button(
+                            label=f"{icons.get(doc_type, '📄')} {doc_type.replace('_', ' ').title()}",
+                            data=f.read(),
+                            file_name=file_path.name,
+                            use_container_width=True
+                        )
+
+# ============================================================================
+# MAIN APP
+# ============================================================================
+
+def main():
+    """Main application entry point."""
+    setup_page()
+    display_header()
+    display_phase_tracker()
+    
+    st.markdown("---")
+    
+    render_sidebar()
+    
+    current_phase = st.session_state.current_phase
+    
+    if current_phase == PHASE_1:
+        render_phase_1()
+    elif current_phase == PHASE_2:
+        render_phase_2()
+    elif current_phase == PHASE_3:
+        render_phase_3()
+    elif current_phase == PHASE_4:
+        render_phase_4()
+    
+    st.markdown("---")
+    st.markdown(f"""
+    <div style="text-align: center; padding: 2rem 0; opacity: 0.8;">
+        <p>Enhanced Training Generator  | {ORGANIZATION}</p>
+        <p style="font-size: 0.875rem;">© 2025 All Rights Reserved</p>
+    </div>
+    """, unsafe_allow_html=True)
 
 if __name__ == "__main__":
     main()

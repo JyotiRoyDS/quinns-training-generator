@@ -1169,7 +1169,7 @@ def initialize_session_state():
     """Initialize all session state variables."""
     defaults = {
         'api_key': load_api_key_from_env(),  # Auto-load from secrets.toml
-        'theme': 'dark',  # Default theme
+        'theme': 'light',  # Default theme
         'current_phase': PHASE_1,
         'phase_completed': {
             PHASE_1: False,

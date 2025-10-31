@@ -138,7 +138,7 @@ TEMP_DIR = Path("temp")
 TEMP_DIR.mkdir(exist_ok=True)
 
 # ============================================================================
-# THEME SYSTEM - DARK AND LIGHT MODE
+# COMPLETE THEME SYSTEM - DARK AND LIGHT MODE WITH ALL FIXES
 # ============================================================================
 
 def get_theme_css(theme: str = "dark") -> str:
@@ -256,6 +256,18 @@ def get_theme_css(theme: str = "dark") -> str:
         font-weight: 600 !important;
     }
     
+    /* Selectbox/Dropdown - Light Theme */
+    .stSelectbox > div > div {
+        background-color: var(--bg-primary) !important;
+        border: 2px solid var(--glass-border) !important;
+    }
+    
+    .stSelectbox [data-baseweb="select"] > div,
+    .stSelectbox [role="option"] {
+        color: var(--text-primary) !important;
+        background-color: var(--bg-primary) !important;
+    }
+    
     /* Info boxes */
     .stInfo {
         background: rgba(59, 130, 246, 0.1) !important;
@@ -359,16 +371,49 @@ def get_theme_css(theme: str = "dark") -> str:
         transform: translateY(-2px) !important;
     }
     
-    /* File uploader */
+    /* File uploader - DARK THEME WITH BLACK TEXT */
     .stFileUploader {
-        background: var(--bg-primary) !important;
-        border: 2px dashed var(--glass-border) !important;
+        background: rgba(248, 250, 252, 0.95) !important;  /* Light background */
+        border: 2px dashed rgba(102, 126, 234, 0.5) !important;
         border-radius: 16px !important;
         padding: 32px !important;
     }
     
     .stFileUploader:hover {
         border-color: var(--primary-color) !important;
+        background: rgba(255, 255, 255, 0.98) !important;
+    }
+    
+    /* File uploader text - ALL BLACK */
+    .stFileUploader label,
+    .stFileUploader span,
+    .stFileUploader p,
+    .stFileUploader div {
+        color: #0f172a !important;  /* Very dark/black */
+        font-weight: 500 !important;
+    }
+    
+    /* File uploader label (main text) */
+    .stFileUploader > label > div {
+        color: #020617 !important;  /* Pure black */
+        font-weight: 600 !important;
+    }
+    
+    /* Drag and drop text */
+    .stFileUploader [data-testid="stFileUploaderDropzone"] {
+        background: white !important;
+    }
+    
+    .stFileUploader [data-testid="stFileUploaderDropzone"] span,
+    .stFileUploader [data-testid="stFileUploaderDropzone"] p,
+    .stFileUploader [data-testid="stFileUploaderDropzone"] small {
+        color: #1e293b !important;  /* Dark slate */
+        font-weight: 500 !important;
+    }
+    
+    /* File uploader instructions text */
+    .stFileUploader small {
+        color: #334155 !important;  /* Medium dark */
     }
     
     /* Progress bar */
@@ -546,25 +591,30 @@ def get_theme_css(theme: str = "dark") -> str:
         color: var(--text-muted) !important;
     }
     
-    /* Input fields */
+    /* Input fields - WHITE BACKGROUND WITH BLACK TEXT */
     .stTextInput input, 
     .stTextArea textarea, 
-    .stNumberInput input,
-    .stSelectbox select {
-        color: white !important;
-        background-color: rgba(30, 27, 75, 0.6) !important;
-        border: 1px solid var(--glass-border) !important;
+    .stNumberInput input {
+        color: #0f172a !important;
+        background-color: white !important;
+        border: 2px solid rgba(102, 126, 234, 0.5) !important;
         border-radius: 10px !important;
         padding: 12px 16px !important;
+        font-weight: 500 !important;
     }
     
     .stTextInput input:focus, 
     .stTextArea textarea:focus,
-    .stNumberInput input:focus,
-    .stSelectbox select:focus {
-        background-color: rgba(30, 27, 75, 0.8) !important;
+    .stNumberInput input:focus {
+        background-color: white !important;
         border-color: var(--primary-color) !important;
         box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.2) !important;
+        color: #0f172a !important;
+    }
+    
+    .stTextInput input::placeholder,
+    .stTextArea textarea::placeholder {
+        color: #94a3b8 !important;
     }
     
     /* Number input controls - HIGHLY VISIBLE */
@@ -583,40 +633,143 @@ def get_theme_css(theme: str = "dark") -> str:
         transform: scale(1.1);
     }
     
-    /* Input labels */
+    /* Input labels - WHITE */
     .stTextInput label,
     .stTextArea label,
     .stNumberInput label,
-    .stSelectbox label,
     .stSlider label,
     .stCheckbox label {
         color: var(--text-primary) !important;
         font-weight: 600 !important;
     }
     
-    /* Info boxes */
+    /* ========== SELECTBOX/DROPDOWN - WHITE BACKGROUND WITH BLACK TEXT ========== */
+    
+    .stSelectbox {
+        color: #0f172a !important;
+    }
+    
+    .stSelectbox label {
+        color: #ffffff !important;
+        font-weight: 600 !important;
+    }
+    
+    /* Selectbox container - WHITE BACKGROUND */
+    .stSelectbox > div > div {
+        background-color: white !important;
+        border: 2px solid rgba(102, 126, 234, 0.5) !important;
+        border-radius: 10px !important;
+    }
+    
+    /* Selected value display - BLACK TEXT */
+    .stSelectbox [data-baseweb="select"] {
+        background-color: white !important;
+    }
+    
+    .stSelectbox [data-baseweb="select"] > div,
+    .stSelectbox [data-baseweb="select"] span,
+    .stSelectbox [data-baseweb="select"] input {
+        color: #0f172a !important;
+        background-color: white !important;
+        font-weight: 600 !important;
+    }
+    
+    /* Dropdown arrow - BLACK */
+    .stSelectbox svg {
+        fill: #0f172a !important;
+    }
+    
+    /* Dropdown menu popover - WHITE BACKGROUND */
+    .stSelectbox [data-baseweb="popover"],
+    .stSelectbox [data-baseweb="menu"],
+    .stSelectbox [role="listbox"],
+    div[role="listbox"],
+    ul[role="listbox"] {
+        background-color: white !important;
+        border: 2px solid rgba(102, 126, 234, 0.5) !important;
+        border-radius: 10px !important;
+        box-shadow: 0 8px 20px rgba(0, 0, 0, 0.3) !important;
+    }
+    
+    /* Dropdown options - BLACK TEXT */
+    .stSelectbox [role="option"],
+    .stSelectbox li,
+    div[role="listbox"] li,
+    ul[role="listbox"] li {
+        color: #0f172a !important;
+        background-color: white !important;
+        font-weight: 500 !important;
+        padding: 12px 16px !important;
+    }
+    
+    /* Dropdown option hover - LIGHT PURPLE */
+    .stSelectbox [role="option"]:hover,
+    .stSelectbox li:hover,
+    div[role="listbox"] li:hover,
+    ul[role="listbox"] li:hover {
+        background-color: rgba(102, 126, 234, 0.15) !important;
+        color: #0f172a !important;
+        font-weight: 600 !important;
+    }
+    
+    /* Selected option - PURPLE BACKGROUND */
+    .stSelectbox [aria-selected="true"],
+    div[role="listbox"] li[aria-selected="true"],
+    ul[role="listbox"] li[aria-selected="true"] {
+        background-color: rgba(102, 126, 234, 0.3) !important;
+        color: #0f172a !important;
+        font-weight: 700 !important;
+    }
+    
+    /* ========== END SELECTBOX STYLING ========== */
+    
+    /* Info boxes - LIGHT BACKGROUND WITH DARK TEXT */
     .stInfo {
-        background: rgba(59, 130, 246, 0.15) !important;
+        background: linear-gradient(135deg, rgba(239, 246, 255, 0.98), rgba(224, 242, 254, 0.98)) !important;
         border-left: 4px solid #3b82f6 !important;
-        color: white !important;
+        border-radius: 8px !important;
+        padding: 16px !important;
+    }
+    
+    .stInfo, .stInfo * {
+        color: #1e3a8a !important;
+        font-weight: 500 !important;
     }
     
     .stSuccess {
-        background: rgba(16, 185, 129, 0.15) !important;
+        background: linear-gradient(135deg, rgba(236, 253, 245, 0.98), rgba(209, 250, 229, 0.98)) !important;
         border-left: 4px solid var(--success-color) !important;
-        color: white !important;
+        border-radius: 8px !important;
+        padding: 16px !important;
+    }
+    
+    .stSuccess, .stSuccess * {
+        color: #065f46 !important;
+        font-weight: 500 !important;
     }
     
     .stWarning {
-        background: rgba(251, 191, 36, 0.15) !important;
+        background: linear-gradient(135deg, rgba(254, 252, 232, 0.98), rgba(254, 249, 195, 0.98)) !important;
         border-left: 4px solid var(--warning-color) !important;
-        color: white !important;
+        border-radius: 8px !important;
+        padding: 16px !important;
+    }
+    
+    .stWarning, .stWarning * {
+        color: #92400e !important;
+        font-weight: 500 !important;
     }
     
     .stError {
-        background: rgba(239, 68, 68, 0.15) !important;
+        background: linear-gradient(135deg, rgba(254, 242, 242, 0.98), rgba(254, 226, 226, 0.98)) !important;
         border-left: 4px solid var(--error-color) !important;
-        color: white !important;
+        border-radius: 8px !important;
+        padding: 16px !important;
+    }
+    
+    .stError, .stError * {
+        color: #7f1d1d !important;
+        font-weight: 500 !important;
     }
     
     /* Expanders */
@@ -677,7 +830,7 @@ def get_theme_css(theme: str = "dark") -> str:
         box-shadow: 0 6px 20px rgba(102, 126, 234, 0.6) !important;
     }
     
-    /* Download buttons - ALWAYS VISIBLE WITH GRADIENT */
+    /* Download buttons - ALWAYS VISIBLE */
     .stDownloadButton button {
         background: linear-gradient(135deg, #10b981, #059669) !important;
         color: white !important;
@@ -698,16 +851,54 @@ def get_theme_css(theme: str = "dark") -> str:
         box-shadow: 0 6px 25px rgba(16, 185, 129, 0.6) !important;
     }
     
-    /* File uploader */
+    /* File uploader - LIGHT BACKGROUND WITH BLACK TEXT */
     .stFileUploader {
-        background: rgba(30, 27, 75, 0.6) !important;
-        border: 2px dashed var(--glass-border) !important;
+        background: linear-gradient(135deg, rgba(248, 250, 252, 0.98), rgba(241, 245, 249, 0.98)) !important;
+        border: 2px dashed rgba(102, 126, 234, 0.6) !important;
         border-radius: 16px !important;
         padding: 32px !important;
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1) !important;
     }
     
     .stFileUploader:hover {
-        border-color: var(--primary-color) !important;
+        border-color: #667eea !important;
+        background: rgba(255, 255, 255, 0.99) !important;
+        box-shadow: 0 6px 20px rgba(102, 126, 234, 0.3) !important;
+    }
+    
+    /* File uploader label - WHITE TEXT */
+    .stFileUploader > label {
+        color: #ffffff !important;
+        font-weight: 600 !important;
+        font-size: 1rem !important;
+    }
+    
+    /* File uploader dropzone - WHITE BACKGROUND */
+    .stFileUploader [data-testid="stFileUploaderDropzone"] {
+        background: white !important;
+        border-radius: 12px !important;
+    }
+    
+    /* All text inside file uploader dropzone - BLACK */
+    .stFileUploader [data-testid="stFileUploaderDropzone"] *,
+    .stFileUploader [data-testid="stFileUploaderDropzone"] span,
+    .stFileUploader [data-testid="stFileUploaderDropzone"] p,
+    .stFileUploader [data-testid="stFileUploaderDropzone"] div,
+    .stFileUploader [data-testid="stFileUploaderDropzone"] small {
+        color: #1e293b !important;
+        font-weight: 500 !important;
+    }
+    
+    /* File name when uploaded */
+    .stFileUploader [data-testid="stFileUploaderFileName"] {
+        color: #0f172a !important;
+        font-weight: 600 !important;
+    }
+    
+    /* Browse files button */
+    .stFileUploader button {
+        color: white !important;
+        background: linear-gradient(135deg, #667eea, #764ba2) !important;
     }
     
     /* Progress bar */
@@ -737,20 +928,42 @@ def get_theme_css(theme: str = "dark") -> str:
         color: white !important;
     }
     
-    /* Sidebar */
+    /* Sidebar - LIGHT BACKGROUND WITH BLACK TEXT */
     section[data-testid="stSidebar"] {
-        background: rgba(15, 23, 42, 0.95) !important;
+        background: rgba(248, 250, 252, 0.98) !important;
         border-right: 1px solid var(--glass-border) !important;
     }
     
     section[data-testid="stSidebar"] * {
-        color: var(--text-secondary) !important;
+        color: #0f172a !important;
     }
     
     section[data-testid="stSidebar"] h1,
     section[data-testid="stSidebar"] h2,
     section[data-testid="stSidebar"] h3 {
-        color: var(--text-primary) !important;
+        color: #020617 !important;
+        font-weight: 700 !important;
+    }
+    
+    section[data-testid="stSidebar"] label,
+    section[data-testid="stSidebar"] p,
+    section[data-testid="stSidebar"] span,
+    section[data-testid="stSidebar"] .stCaption,
+    section[data-testid="stSidebar"] div {
+        color: #1e293b !important;
+    }
+    
+    /* Sidebar input fields */
+    section[data-testid="stSidebar"] input,
+    section[data-testid="stSidebar"] select,
+    section[data-testid="stSidebar"] textarea {
+        color: #0f172a !important;
+        background-color: white !important;
+    }
+    
+    /* Keep sidebar button text white */
+    section[data-testid="stSidebar"] .stButton button {
+        color: white !important;
     }
     
     /* Phase badges */
@@ -810,6 +1023,32 @@ def get_theme_css(theme: str = "dark") -> str:
         font-weight: 700;
         display: inline-block;
         box-shadow: 0 2px 8px rgba(59, 130, 246, 0.4);
+    }
+    
+    /* FORCE DROPDOWN TEXT BLACK - GLOBAL OVERRIDE */
+    [data-baseweb="select"] *:not(svg),
+    [data-baseweb="popover"] *:not(svg),
+    [data-baseweb="menu"] *:not(svg),
+    [role="listbox"] *:not(svg),
+    div[role="listbox"] *:not(svg),
+    ul[role="listbox"] *:not(svg),
+    li[role="option"] *:not(svg) {
+        color: #0f172a !important;
+    }
+    
+    [data-baseweb="select"],
+    [data-baseweb="popover"],
+    [data-baseweb="menu"],
+    [role="listbox"],
+    div[role="listbox"],
+    ul[role="listbox"] {
+        background-color: white !important;
+    }
+    
+    /* Keep selectbox label white */
+    .stSelectbox > label,
+    .stSelectbox > label * {
+        color: #ffffff !important;
     }
     
     #MainMenu {visibility: hidden;}
@@ -953,7 +1192,7 @@ def initialize_session_state():
         'extended_mode': False,
         'custom_slide_count': None,
         'template': 'Corporate - Professional',
-        'include_assessments': False,
+        'include_assessments': True,
         'include_activities': True,
         'detailed_analytics': False,
         'enhanced_trainer_guide': True,
@@ -2010,21 +2249,36 @@ class ContentEditor:
     
     @staticmethod
     def render_topics_editor(topics: List[Dict]) -> List[Dict]:
-        """Render interactive UI for editing topics WITH COLOR-CODED IMPORTANCE."""
+        """Render interactive UI for editing topics WITH DELETE and ADD functionality."""
         st.markdown("### 📋 Edit Extracted Topics")
         st.markdown("Review and modify the topics extracted from your document.")
         
+        # Initialize delete tracking
+        if 'topics_to_delete' not in st.session_state:
+            st.session_state.topics_to_delete = []
+        
         edited_topics = []
         
-        for idx, topic in enumerate(topics):
-            # Show importance badge in header
+        # Filter out deleted topics
+        active_topics = [t for t in topics if t.get('id') not in st.session_state.topics_to_delete]
+        
+        for idx, topic in enumerate(active_topics):
+            topic_id = topic.get('id', idx + 1)
             importance_badge = render_importance_badge(topic.get('importance', 'medium'))
             
             with st.expander(
                 f"**Topic {idx + 1}: {topic.get('title', 'Untitled')}**", 
                 expanded=(idx == 0)
             ):
-                st.markdown(f"Current Importance: {importance_badge}", unsafe_allow_html=True)
+                # Delete button at the top
+                col_header = st.columns([4, 1])
+                with col_header[0]:
+                    st.markdown(f"Current Importance: {importance_badge}", unsafe_allow_html=True)
+                with col_header[1]:
+                    if st.button("🗑️ Delete", key=f"delete_topic_{topic_id}", type="secondary"):
+                        st.session_state.topics_to_delete.append(topic_id)
+                        st.rerun()
+                
                 st.markdown("---")
                 
                 col1, col2 = st.columns([3, 1])
@@ -2033,7 +2287,7 @@ class ContentEditor:
                     title = st.text_input(
                         "Topic Title",
                         value=topic.get('title', ''),
-                        key=f"topic_title_{idx}"
+                        key=f"topic_title_{topic_id}"
                     )
                 
                 with col2:
@@ -2049,7 +2303,7 @@ class ContentEditor:
                         "Importance Level",
                         options=list(importance_options.values()),
                         index=list(importance_options.keys()).index(current_importance),
-                        key=f"topic_importance_{idx}"
+                        key=f"topic_importance_{topic_id}"
                     )
                     
                     # Extract actual importance value
@@ -2060,7 +2314,7 @@ class ContentEditor:
                 description = st.text_area(
                     "Description",
                     value=topic.get('description', ''),
-                    key=f"topic_desc_{idx}",
+                    key=f"topic_desc_{topic_id}",
                     height=100
                 )
                 
@@ -2071,7 +2325,7 @@ class ContentEditor:
                     key_concepts = st.text_input(
                         "Key Concepts (comma-separated)",
                         value=key_concepts_str,
-                        key=f"topic_concepts_{idx}"
+                        key=f"topic_concepts_{topic_id}"
                     )
                 
                 with col4:
@@ -2081,11 +2335,11 @@ class ContentEditor:
                         max_value=180,
                         value=int(topic.get('estimated_duration_minutes', 45)),
                         step=5,
-                        key=f"topic_duration_{idx}"
+                        key=f"topic_duration_{topic_id}"
                     )
                 
                 edited_topics.append({
-                    'id': topic.get('id', idx + 1),
+                    'id': topic_id,
                     'title': title,
                     'description': description,
                     'key_concepts': [k.strip() for k in key_concepts.split(',') if k.strip()],
@@ -2095,25 +2349,60 @@ class ContentEditor:
         
         st.markdown("---")
         
-        if st.button("➕ Add New Topic", use_container_width=True):
-            new_topic = {
-                'id': len(edited_topics) + 1,
-                'title': f"New Topic {len(edited_topics) + 1}",
-                'description': "Enter topic description",
-                'key_concepts': ["concept1", "concept2", "concept3"],
-                'importance': 'medium',
-                'estimated_duration_minutes': 45
-            }
-            edited_topics.append(new_topic)
-            st.rerun()
+        # Action buttons - ALL WITH UNIQUE KEYS
+        col1, col2, col3 = st.columns([1, 2, 1])
+        
+        with col1:
+            if st.button("➕ Add New Topic", use_container_width=True, key="add_new_topic_btn"):
+                # Generate new unique ID
+                existing_ids = [t.get('id', 0) for t in edited_topics]
+                new_id = max(existing_ids + [0]) + 1
+                
+                new_topic = {
+                    'id': new_id,
+                    'title': f"New Topic {len(edited_topics) + 1}",
+                    'description': "Enter topic description here",
+                    'key_concepts': ["concept1", "concept2", "concept3"],
+                    'importance': 'medium',
+                    'estimated_duration_minutes': 45
+                }
+                edited_topics.append(new_topic)
+                
+                # Save immediately to session state
+                st.session_state.edited_topics = edited_topics
+                st.success("✅ New topic added!")
+                time.sleep(0.5)
+                st.rerun()
+        
+        with col2:
+            if st.button("💾 Save Changes", use_container_width=True, type="primary", key="save_topics_btn"):
+                st.session_state.edited_topics = edited_topics
+                st.session_state.topics_to_delete = []  # Clear delete tracking
+                st.success("✅ Topics saved successfully!")
+                st.balloons()
+                time.sleep(1)
+                st.rerun()
+        
+        with col3:
+            if st.button("🔄 Reset", use_container_width=True, key="reset_topics_btn"):
+                st.session_state.topics_to_delete = []
+                st.session_state.edited_topics = None
+                st.rerun()
+        
+        # Show current stats
+        st.info(f"📊 Current topics: {len(edited_topics)} topics, Total duration: {sum(t['estimated_duration_minutes'] for t in edited_topics)} minutes")
         
         return edited_topics
     
     @staticmethod
     def render_outline_editor(outline: Dict) -> Dict:
-        """Render interactive UI for editing training outline."""
+        """Render interactive UI for editing training outline with delete functionality."""
         st.markdown("### 📝 Edit Training Outline")
         st.markdown("Customize your training program structure and modules.")
+        
+        # Initialize delete tracking
+        if 'modules_to_delete' not in st.session_state:
+            st.session_state.modules_to_delete = []
         
         st.markdown("#### Global Settings")
         
@@ -2155,27 +2444,44 @@ class ContentEditor:
         st.markdown("#### Training Modules")
         
         edited_modules = []
+        modules_list = outline.get('modules', [])
         
-        for idx, module in enumerate(outline.get('modules', [])):
+        # Filter out deleted modules
+        modules_list = [m for m in modules_list if m.get('id') not in st.session_state.modules_to_delete]
+        
+        for idx, module in enumerate(modules_list):
+            module_id = module.get('id', idx + 1)
+            
             with st.expander(
                 f"**Module {idx + 1}: {module.get('title', 'Untitled')}** "
                 f"({module.get('estimated_slides', 0)} slides)",
                 expanded=(idx == 0)
             ):
+                # Delete button at the top of each module - UNIQUE KEY
+                col_delete = st.columns([4, 1])
+                with col_delete[0]:
+                    st.markdown(f"**Module ID: {module_id}**")
+                with col_delete[1]:
+                    if st.button(f"🗑️ Delete", key=f"delete_module_{module_id}", type="secondary"):
+                        st.session_state.modules_to_delete.append(module_id)
+                        st.success(f"Module {idx + 1} deleted")
+                        time.sleep(0.5)
+                        st.rerun()
+                
                 col1, col2, col3 = st.columns([2, 1, 1])
                 
                 with col1:
                     module_title = st.text_input(
                         "Module Title",
                         value=module.get('title', ''),
-                        key=f"module_title_{idx}"
+                        key=f"module_title_{module_id}"
                     )
                 
                 with col2:
                     module_duration = st.text_input(
                         "Duration",
                         value=module.get('duration', ''),
-                        key=f"module_duration_{idx}"
+                        key=f"module_duration_{module_id}"
                     )
                 
                 with col3:
@@ -2184,7 +2490,7 @@ class ContentEditor:
                         min_value=1,
                         max_value=100,
                         value=min(int(module.get('estimated_slides', 10)), 100),
-                        key=f"module_slides_{idx}",
+                        key=f"module_slides_{module_id}",
                         help="Use +/- buttons to adjust"
                     )
                 
@@ -2192,7 +2498,7 @@ class ContentEditor:
                 module_objectives = st.text_area(
                     "Module Objectives (one per line)",
                     value=module_objectives_text,
-                    key=f"module_objectives_{idx}",
+                    key=f"module_objectives_{module_id}",
                     height=100
                 )
                 module_objectives_list = [obj.strip() for obj in module_objectives.split('\n') if obj.strip()]
@@ -2201,7 +2507,7 @@ class ContentEditor:
                 topics_covered = st.text_input(
                     "Topics Covered (comma-separated)",
                     value=topics_covered_str,
-                    key=f"module_topics_{idx}"
+                    key=f"module_topics_{module_id}"
                 )
                 topics_covered_list = [t.strip() for t in topics_covered.split(',') if t.strip()]
                 
@@ -2209,13 +2515,13 @@ class ContentEditor:
                 key_points = st.text_area(
                     "Key Points (one per line)",
                     value=key_points_text,
-                    key=f"module_keypoints_{idx}",
+                    key=f"module_keypoints_{module_id}",
                     height=120
                 )
                 key_points_list = [kp.strip() for kp in key_points.split('\n') if kp.strip()]
                 
                 edited_modules.append({
-                    'id': module.get('id', idx + 1),
+                    'id': module_id,
                     'title': module_title,
                     'duration': module_duration,
                     'objectives': module_objectives_list,
@@ -2226,20 +2532,67 @@ class ContentEditor:
         
         st.markdown("---")
         
+        # Action buttons - ALL WITH UNIQUE KEYS
         col1, col2, col3 = st.columns([1, 2, 1])
-        with col2:
-            if st.button("➕ Add New Module", use_container_width=True):
+        
+        with col1:
+            if st.button("➕ Add Module", use_container_width=True, key="add_new_module_btn"):
+                # Generate new unique ID
+                existing_ids = [m.get('id', 0) for m in edited_modules]
+                new_id = max(existing_ids + [0]) + 1
+                
                 new_module = {
-                    'id': len(edited_modules) + 1,
+                    'id': new_id,
                     'title': f"New Module {len(edited_modules) + 1}",
                     'duration': "2 hours",
-                    'objectives': ["Objective 1", "Objective 2"],
+                    'objectives': ["Objective 1", "Objective 2", "Objective 3"],
                     'topics': ["Topic 1", "Topic 2"],
-                    'key_points': ["Key point 1", "Key point 2"],
+                    'key_points': ["Key point 1", "Key point 2", "Key point 3"],
                     'estimated_slides': 10
                 }
                 edited_modules.append(new_module)
+                
+                # Update the outline in session state immediately
+                edited_outline = {
+                    'title': title,
+                    'description': description,
+                    'duration': duration,
+                    'objectives': objectives_list,
+                    'modules': edited_modules,
+                    'total_modules': len(edited_modules),
+                    'estimated_slides': sum(m['estimated_slides'] for m in edited_modules)
+                }
+                st.session_state.edited_outline = edited_outline
+                st.success("✅ New module added!")
+                time.sleep(0.5)
                 st.rerun()
+        
+        with col2:
+            if st.button("💾 Save Changes", use_container_width=True, type="primary", key="save_outline_btn"):
+                edited_outline = {
+                    'title': title,
+                    'description': description,
+                    'duration': duration,
+                    'objectives': objectives_list,
+                    'modules': edited_modules,
+                    'total_modules': len(edited_modules),
+                    'estimated_slides': sum(m['estimated_slides'] for m in edited_modules)
+                }
+                st.session_state.edited_outline = edited_outline
+                st.session_state.modules_to_delete = []  # Clear delete tracking
+                st.success("✅ Changes saved successfully!")
+                st.balloons()
+                time.sleep(1)
+                st.rerun()
+        
+        with col3:
+            if st.button("🔄 Reset", use_container_width=True, key="reset_outline_btn"):
+                st.session_state.modules_to_delete = []
+                st.session_state.edited_outline = None
+                st.rerun()
+        
+        # Show current stats
+        st.info(f"📊 Current outline: {len(edited_modules)} modules, {sum(m['estimated_slides'] for m in edited_modules)} total slides")
         
         edited_outline = {
             'title': title,
@@ -2625,14 +2978,18 @@ def render_phase_3():
     with tab2:
         outline = st.session_state.edited_outline or st.session_state.generated_outline
         edited_outline = ContentEditor.render_outline_editor(outline)
-        st.session_state.edited_outline = edited_outline
+        # Note: edited_outline is returned but saved via button click
     
     st.markdown("---")
     
-    if st.button("✅ Validate & Continue to Phase 4", type="primary", use_container_width=True):
-        st.session_state.phase_completed[PHASE_3] = True
-        st.session_state.current_phase = PHASE_4
-        st.rerun()
+    # Only allow proceeding if changes have been saved
+    if st.session_state.edited_outline:
+        if st.button("✅ Finalize & Continue to Phase 4", type="primary", use_container_width=True):
+            st.session_state.phase_completed[PHASE_3] = True
+            st.session_state.current_phase = PHASE_4
+            st.rerun()
+    else:
+        st.info("💡 Click 'Save Changes' in the Outline tab to proceed to Phase 4")
 
 def render_phase_4():
     """Render Phase 4: Document Generation."""
